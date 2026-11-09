@@ -24,7 +24,7 @@ public static class NativeMenuBitmap
         }
         finally{DeleteObject(bitmap);}
     }
-    public static string? Encode(IntPtr bitmap)
+    public static string? Encode(IntPtr bitmap,bool requireTransparency=true)
     {
         // Shell owns this handle, including its alpha channel. HBitmap-to-WPF
         // convenience conversion can discard alpha and produce black squares.
@@ -40,7 +40,7 @@ public static class NativeMenuBitmap
             bool alpha=false,transparent=false;for(int i=3;i<pixels.Length;i+=4){if(pixels[i]!=0)alpha=true;if(pixels[i]<255)transparent=true;}
             // A legacy bitmap without alpha has no reliable transparency mask.
             // Do not manufacture an opaque black background; use the SVG fallback.
-            if(!alpha||!transparent)return null;
+            if(!alpha||(requireTransparency&&!transparent))return null;
             var source=BitmapSource.Create(size.Width,size.Height,96,96,PixelFormats.Pbgra32,null,pixels,size.Width*4);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(source));using var stream=new MemoryStream();encoder.Save(stream);
             return "data:image/png;base64,"+Convert.ToBase64String(stream.ToArray());

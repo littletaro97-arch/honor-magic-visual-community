@@ -56,6 +56,7 @@ using namespace Windows::Foundation::Numerics;
 namespace abiComposition = ABI::Windows::UI::Composition;
 constexpr UINT PacketMessage = WM_APP + 1, AnimationMessage = WM_APP + 2;
 constexpr size_t PacketLimit = 1024 * 1024, IconLimit = 8 * 1024 * 1024, SurfaceLimit = 64 * 1024 * 1024;
+#include "native-icon-cache.h"
 inline std::wstring Str(JsonObject const &value, wchar_t const *key)
 {
     auto v = value ? value.TryLookup(key) : nullptr;

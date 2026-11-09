@@ -756,18 +756,11 @@ void Window::ReceiveIcons(JsonObject const &result)
         check_hresult(frame->GetSize(&w, &h));
         if (!w || !h || w > 512 || h > 512)
             continue;
+        auto raster=NativeIconRaster(app.graphics.wic.get(),frame.get(),w,h);
         size_t allocation = static_cast<size_t>(w) * h * 4;
-        while (!icons.empty() && (icons.size() >= 128 || iconBytes + allocation > IconLimit))
-        {
-            auto oldest = std::min_element(icons.begin(), icons.end(), [](auto const &a, auto const &b) {
-                return a.second.age < b.second.age;
-            });
-            iconBytes -= oldest->second.bytes;
-            icons.erase(oldest);
-        }
         com_ptr<IWICFormatConverter> converter;
         check_hresult(app.graphics.wic->CreateFormatConverter(converter.put()));
-        check_hresult(converter->Initialize(frame.get(), GUID_WICPixelFormat32bppPBGRA,
+        check_hresult(converter->Initialize(raster.get(), GUID_WICPixelFormat32bppPBGRA,
                                             WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom));
         com_ptr<ID2D1DeviceContext> c;
         check_hresult(app.graphics.d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, c.put()));
@@ -776,8 +769,13 @@ void Window::ReceiveIcons(JsonObject const &result)
         icon.bytes = allocation;
         icon.age = ++iconAge;
         auto previous = icons.find(key);
-        if (previous != icons.end())
-            iconBytes -= previous->second.bytes;
+        if (previous != icons.end()){
+            iconBytes -= previous->second.bytes;icons.erase(previous);
+        }
+        while (!icons.empty() && (icons.size() >= NativeIconEntries || iconBytes + allocation > IconLimit)){
+            auto oldest=std::min_element(icons.begin(),icons.end(),[](auto const &a,auto const &b){return a.second.age<b.second.age;});
+            iconBytes-=oldest->second.bytes;icons.erase(oldest);
+        }
         icons[key] = std::move(icon);
         if(folderMorph)folderMorph->RefreshIcon(*this,key);
         iconBytes += allocation;
@@ -2545,6 +2543,7 @@ int CheckFolderGeometry()
 #include "../../tools/review/native-dock-followup-checks.h"
 #include "../../tools/review/native-oct29-followup-checks.h"
 #include "native-transition.h"
+#include "native-icon-cache-checks.h"
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -2562,6 +2561,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     {
         int count = 0;
         auto args = CommandLineToArgvW(GetCommandLineW(), &count);
+        if(count==3&&std::wstring(args[1])==L"--check-icon-cache"){
+            std::wstring report=args[2];LocalFree(args);return CheckNativeIconCache(report);
+        }
         if (count == 2 && std::wstring(args[1]) == L"--check-geometry")
         {
             LocalFree(args);

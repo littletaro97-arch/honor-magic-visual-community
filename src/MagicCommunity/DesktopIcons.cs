@@ -117,6 +117,9 @@ public sealed class DesktopIcons : IDisposable
         IntPtr pidl=IntPtr.Zero;
         try
         {
+            // Request a high-resolution Shell icon before falling back to SHGFI_LARGEICON.
+            // The renderer may display >32 physical pixels on high-DPI displays.
+            if(!imageFile && ShellIconImageFactory.Read(item.Target) is { } sharpIcon)return sharpIcon;
             var info=new FileInfoNative();uint flags=0x100; // SHGFI_ICON, large icon
             if(DesktopFileDrop.IsRecycleBin(item))
             {
@@ -146,7 +149,7 @@ public sealed class DesktopIcons : IDisposable
                     int limit=resizeImage?2048:256;
                     if(frame.PixelWidth<1||frame.PixelWidth>limit||frame.PixelHeight<1||frame.PixelHeight>limit)return null;
                     System.Windows.Media.Imaging.BitmapSource image=frame;
-                    int largest=Math.Max(frame.PixelWidth,frame.PixelHeight);if(resizeImage&&largest>128){double scale=128.0/largest;image=new TransformedBitmap(frame,new System.Windows.Media.ScaleTransform(scale,scale));}
+                    int largest=Math.Max(frame.PixelWidth,frame.PixelHeight);if(resizeImage&&largest>256){double scale=256.0/largest;image=new TransformedBitmap(frame,new System.Windows.Media.ScaleTransform(scale,scale));}
                     var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(image));using var output=new MemoryStream();png.Save(output);
                     return output.Length<=65536?"data:image/png;base64,"+Convert.ToBase64String(output.ToArray()):null;
                 }

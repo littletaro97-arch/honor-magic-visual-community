@@ -656,18 +656,11 @@ struct NativeShell
                 check_hresult(frame->GetSize(&w, &h));
                 if (w > 256 || h > 256 || !w || !h)
                     continue;
+                auto raster=NativeIconRaster(app.graphics.wic.get(),frame.get(),w,h);
                 size_t allocation = static_cast<size_t>(w) * h * 4;
-                while (!icons.empty() && (icons.size() >= 128 || iconBytes + allocation > 8 * 1024 * 1024))
-                {
-                    auto old = std::min_element(icons.begin(), icons.end(), [](auto const &a, auto const &b) {
-                        return a.second.age < b.second.age;
-                    });
-                    iconBytes -= old->second.bytes;luminances.erase(old->first);
-                    icons.erase(old);
-                }
                 com_ptr<IWICFormatConverter> converter;
                 check_hresult(app.graphics.wic->CreateFormatConverter(converter.put()));
-                check_hresult(converter->Initialize(frame.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
+                check_hresult(converter->Initialize(raster.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
                                                     nullptr, 0, WICBitmapPaletteTypeCustom));
                 com_ptr<ID2D1DeviceContext> context;
                 check_hresult(app.graphics.d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, context.put()));
@@ -676,7 +669,11 @@ struct NativeShell
                 std::vector<BYTE> pixels(static_cast<size_t>(w)*h*4);if(SUCCEEDED(converter->CopyPixels(nullptr,w*4,static_cast<UINT>(pixels.size()),pixels.data()))){double sum=0;for(size_t k=0;k<pixels.size();k+=4){double alpha=pixels[k+3];if(alpha>0)sum+=(.299*pixels[k+2]+.587*pixels[k+1]+.114*pixels[k])*255/alpha;}luminances[key]=static_cast<float>(sum/(w*h));}
                 icon.bytes = allocation;
                 icon.age = ++iconAge;
-                if(auto old=icons.find(key);old!=icons.end())iconBytes-=old->second.bytes;
+                if(auto old=icons.find(key);old!=icons.end()){iconBytes-=old->second.bytes;icons.erase(old);}
+                while(!icons.empty()&&(icons.size()>=NativeIconEntries||iconBytes+allocation>IconLimit)){
+                    auto old=std::min_element(icons.begin(),icons.end(),[](auto const &a,auto const &b){return a.second.age<b.second.age;});
+                    iconBytes-=old->second.bytes;luminances.erase(old->first);icons.erase(old);
+                }
                 refreshIcons.erase(key);iconBytes += allocation;
                 icons[key] = std::move(icon);
                 pending.erase(key);

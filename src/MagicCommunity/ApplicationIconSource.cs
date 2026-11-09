@@ -21,6 +21,12 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
         if(Image!=Path&&System.IO.Path.GetExtension(Image).ToLowerInvariant() is ".png" or ".ico" or ".jpg" or ".jpeg" or ".bmp")
             if(Try("pack-image",()=>DesktopIcons.Read(new(){Target=Image},true,resizeImage:true)) is { } packed)return packed;
         if(!Application)return Try("tray-image",()=>DesktopIcons.Read(new(){Target=Image},true,resizeImage:true));
+        // Packaged apps can return a generic document from the Shell image factory.
+        // Preserve the existing package-logo lookup before trying the general Shell path.
+        if(!string.IsNullOrWhiteSpace(Umid))
+            if(Try("application-id",()=>ShellImage(@"shell:AppsFolder\"+Umid)) is { } package)return package;
+        // Prefer the registered Shell image over a small WM_GETICON / ExtractIconEx image.
+        if(Try("high-resolution-shell",()=>ShellIconImageFactory.Read(Path)) is { } sharp)return sharp;
         if(Window!=0&&IsWindow(new(Window))){
             if(Try("window",()=>WindowIcon(new(Window))) is { } icon)return icon;
             if(Try("process",()=>{
@@ -28,8 +34,6 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
                 string executable=process.MainModule?.FileName??"";return ExecutableIcon(executable);
             }) is { } module)return module;
         }
-        if(!string.IsNullOrWhiteSpace(Umid))
-            if(Try("application-id",()=>ShellImage(@"shell:AppsFolder\"+Umid)) is { } package)return package;
         if(Try("executable",()=>ExecutableIcon(Path)) is { } file)return file;
         if(System.IO.Path.GetExtension(Path).Equals(".lnk",StringComparison.OrdinalIgnoreCase)&&File.Exists(Path))
             if(Try("shortcut",()=>DesktopIcons.Read(new(){Target=Path},false)) is { } shortcut)return shortcut;
@@ -54,7 +58,7 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
         string path=System.IO.Path.GetFullPath(System.IO.Path.Combine(root,relative));
         if(!path.StartsWith(root,StringComparison.OrdinalIgnoreCase)||!System.IO.Path.GetExtension(path).Equals(".png",StringComparison.OrdinalIgnoreCase))return null;
         string stem=path[..^4];
-        foreach(string qualifier in new[]{".targetsize-128_altform-unplated",".targetsize-128",".targetsize-256_altform-unplated",".targetsize-256",".targetsize-48_altform-unplated",".targetsize-48",".scale-200",".scale-100",""}){
+        foreach(string qualifier in new[]{".targetsize-256_altform-unplated",".targetsize-256",".targetsize-128_altform-unplated",".targetsize-128",".targetsize-48_altform-unplated",".targetsize-48",".scale-200",".scale-100",""}){
             string candidate=stem+qualifier+".png";
             if(File.Exists(candidate)&&DesktopIcons.Read(new(){Target=candidate},true,resizeImage:true) is { } png)return png;
         }
@@ -83,9 +87,9 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
         }else Marshal.ThrowExceptionForHR(SHCreateItemFromParsingName(path,IntPtr.Zero,ref iid,out factory));
         IntPtr bitmap=IntPtr.Zero;
         try{
-            Marshal.ThrowExceptionForHR(factory.GetImage(new Size(128,128),4,out bitmap));
-            string? png=NativeMenuBitmap.Encode(bitmap);
-            return png is not null&&png.Length<90000?png:null;
+            Marshal.ThrowExceptionForHR(factory.GetImage(new Size(256,256),5,out bitmap));
+            string? png=NativeMenuBitmap.Encode(bitmap,false);
+            return png is not null&&png.Length<=22+4*(65536/3)?png:null;
         }
         finally{if(bitmap!=IntPtr.Zero)DeleteObject(bitmap);Marshal.FinalReleaseComObject(factory);}
     }

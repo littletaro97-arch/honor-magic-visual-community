@@ -21,9 +21,36 @@ static BOOL Attach(HWND window){ATOM atom=(ATOM)(ULONG_PTR)GetPropW(window,MAGIC
 static BOOL Push(MagicTrayEntry const* item){LONG write,read;if(!shared)return FALSE;if(InterlockedCompareExchange(&shared->lock,1,0)!=0){InterlockedIncrement(&shared->dropped);return FALSE;}write=shared->writeIndex;read=shared->readIndex;if((ULONG)(write-read)>=MAGIC_TRAY_CAPACITY){InterlockedExchange(&shared->lock,0);InterlockedIncrement(&shared->dropped);SetEvent(changed);return FALSE;}shared->entries[(ULONG)write%MAGIC_TRAY_CAPACITY]=*item;InterlockedExchange(&shared->writeIndex,write+1);InterlockedExchange(&shared->lock,0);SetEvent(changed);return TRUE;}
 static BOOL HasGuid(GUID const* id){static GUID empty;return memcmp(id,&empty,sizeof(GUID))!=0;}
 static BOOL Same(MagicTrayEntry const* a,MagicTrayEntry const* b){if(HasGuid(&a->iconGuid)&&HasGuid(&b->iconGuid))return memcmp(&a->iconGuid,&b->iconGuid,sizeof(GUID))==0;return a->ownerHwnd==b->ownerHwnd&&a->id==b->id;}
-static BOOL Pixels(HICON icon,BYTE* out){BITMAPINFO info;HDC dc;HBITMAP bitmap,old;BYTE* pixels;ULONG n;BOOL good=FALSE;int width=MAGIC_TRAY_ICON_SIZE,height=MAGIC_TRAY_ICON_SIZE;ZeroMemory(&info,sizeof(info));info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height*2;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;dc=CreateCompatibleDC(NULL);if(!dc)return FALSE;bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,(void**)&pixels,NULL,0);if(!bitmap){DeleteDC(dc);return FALSE;}old=(HBITMAP)SelectObject(dc,bitmap);ZeroMemory(pixels,MAGIC_TRAY_BYTES);memset(pixels+MAGIC_TRAY_BYTES,255,MAGIC_TRAY_BYTES);
-    if(DrawIconEx(dc,0,0,icon,width,height,0,NULL,DI_NORMAL)&&DrawIconEx(dc,0,height,icon,width,height,0,NULL,DI_NORMAL)){GdiFlush();for(n=0;n<MAGIC_TRAY_BYTES;n+=4){int b=pixels[MAGIC_TRAY_BYTES+n]-pixels[n],g=pixels[MAGIC_TRAY_BYTES+n+1]-pixels[n+1],r=pixels[MAGIC_TRAY_BYTES+n+2]-pixels[n+2];int transparent=max(0,max(b,max(g,r)));out[n]=pixels[n];out[n+1]=pixels[n+1];out[n+2]=pixels[n+2];out[n+3]=(BYTE)(255-min(255,transparent));}good=TRUE;}
-    SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);return good;}
+static BOOL Pixels(HICON icon,BYTE* out,ULONG* pixelWidth,ULONG* pixelHeight){
+    ICONINFO source;BITMAP size;BITMAPINFO info;HDC dc;HBITMAP bitmap,old;BYTE* pixels;
+    ULONG n,bytes;BOOL good=FALSE;int width=0,height=0;
+    *pixelWidth=*pixelHeight=0;ZeroMemory(out,MAGIC_TRAY_BYTES);ZeroMemory(&source,sizeof(source));ZeroMemory(&size,sizeof(size));
+    if(!icon||!GetIconInfo(icon,&source))return FALSE;
+    if(source.hbmColor&&GetObject(source.hbmColor,sizeof(size),&size)){width=size.bmWidth;height=size.bmHeight;}
+    else if(source.hbmMask&&GetObject(source.hbmMask,sizeof(size),&size)){width=size.bmWidth;height=size.bmHeight/2;}
+    if(source.hbmColor)DeleteObject(source.hbmColor);if(source.hbmMask)DeleteObject(source.hbmMask);
+    if(width<1||height<1)return FALSE;
+    /* Preserve the supplied raster; do not enlarge 16/32px status images first.
+       Higher-resolution application-provided state images keep up to 64px. */
+    if(width>MAGIC_TRAY_ICON_SIZE||height>MAGIC_TRAY_ICON_SIZE){
+        int largest=max(width,height);width=max(1,MulDiv(width,MAGIC_TRAY_ICON_SIZE,largest));height=max(1,MulDiv(height,MAGIC_TRAY_ICON_SIZE,largest));
+    }
+    bytes=(ULONG)width*(ULONG)height*4u;
+    ZeroMemory(&info,sizeof(info));info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;
+    info.bmiHeader.biHeight=-height*2;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+    dc=CreateCompatibleDC(NULL);if(!dc)return FALSE;
+    bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,(void**)&pixels,NULL,0);
+    if(!bitmap){DeleteDC(dc);return FALSE;}old=(HBITMAP)SelectObject(dc,bitmap);
+    ZeroMemory(pixels,bytes);memset(pixels+bytes,255,bytes);
+    if(DrawIconEx(dc,0,0,icon,width,height,0,NULL,DI_NORMAL)&&DrawIconEx(dc,0,height,icon,width,height,0,NULL,DI_NORMAL)){
+        GdiFlush();for(n=0;n<bytes;n+=4){
+            int b=pixels[bytes+n]-pixels[n],g=pixels[bytes+n+1]-pixels[n+1],r=pixels[bytes+n+2]-pixels[n+2];
+            int transparent=max(0,max(b,max(g,r)));out[n]=pixels[n];out[n+1]=pixels[n+1];out[n+2]=pixels[n+2];out[n+3]=(BYTE)(255-min(255,transparent));
+        }
+        *pixelWidth=(ULONG)width;*pixelHeight=(ULONG)height;good=TRUE;
+    }
+    SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);return good;
+}
 static BOOL Decode(COPYDATASTRUCT const* data,MagicTrayEntry* out,HICON* icon){BYTE const* bytes;DWORD signature,message,size;ULONG count;*icon=NULL;ZeroMemory(out,sizeof(*out));if(!data||data->dwData!=1||data->cbData<32||data->cbData>65536||!data->lpData)return FALSE;bytes=(BYTE const*)data->lpData;memcpy(&signature,bytes,4);memcpy(&message,bytes+4,4);memcpy(&size,bytes+8,4);if(signature!=0x34753423||message>NIM_SETVERSION||size<24||size>sizeof(NOTIFYICONDATAW)||size+8>data->cbData)return FALSE;out->event=message;
     BOOL nativeLayout=(size==sizeof(NOTIFYICONDATAW)||size==NOTIFYICONDATAW_V3_SIZE||size==NOTIFYICONDATAW_V2_SIZE||size==NOTIFYICONDATAW_V1_SIZE);
     /* Win32 V3 (952 bytes) overlaps Win64 V2. Resolve the owner before
@@ -57,7 +84,7 @@ static void Capture(CWPRETSTRUCT const* call){MagicTrayEntry item;HICON icon;ULO
     if(item.event==NIM_ADD&&call->lResult)target->data.version=0;
     if(item.event==NIM_SETVERSION)target->data.version=item.version;
     else if(target->data.version==MAGIC_TRAY_VERSION_UNKNOWN&&LateQtVersion4(&item))target->data.version=NOTIFYICON_VERSION_4;
-    if((item.flags&NIF_ICON)&&icon)target->data.hasPixels=Pixels(icon,target->data.pixels);
+    if((item.flags&NIF_ICON)&&icon)target->data.hasPixels=Pixels(icon,target->data.pixels,&target->data.pixelWidth,&target->data.pixelHeight);
     Push(&target->data);
 }
 static BOOL PostCallback(PrivateIcon const* item,UINT event,POINT point){
