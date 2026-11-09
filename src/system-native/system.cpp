@@ -161,7 +161,8 @@ void Broker::ConfigureOnThread()
         for (auto range : std::vector<std::pair<DWORD, DWORD>>{{EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND},
                                                                {EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND},
                                                                {EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND},
-                                                               {EVENT_OBJECT_CREATE, EVENT_OBJECT_NAMECHANGE}})
+                                                               {EVENT_OBJECT_CREATE, EVENT_OBJECT_NAMECHANGE},
+                                                               {EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED}})
         {
             auto hook = SetWinEventHook(range.first, range.second, nullptr, WindowEvent, 0, 0,
                                         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
@@ -407,7 +408,8 @@ void CALLBACK Broker::WindowEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG ob
         return;
     if (event >= EVENT_OBJECT_CREATE && event != EVENT_OBJECT_CREATE && event != EVENT_OBJECT_DESTROY &&
         event != EVENT_OBJECT_SHOW && event != EVENT_OBJECT_HIDE && event != EVENT_OBJECT_NAMECHANGE &&
-        event != EVENT_OBJECT_LOCATIONCHANGE && event != EVENT_OBJECT_STATECHANGE)
+        event != EVENT_OBJECT_LOCATIONCHANGE && event != EVENT_OBJECT_STATECHANGE &&
+        event != EVENT_OBJECT_CLOAKED && event != EVENT_OBJECT_UNCLOAKED)
         return;
     PostMessageW(current->relay, EventMessage, event, reinterpret_cast<LPARAM>(hwnd));
 }
@@ -445,7 +447,7 @@ bool Broker::ReadWindow(HWND hwnd, WindowInfo &out) const
             }
         }
         out.created = Created(process);
-        if(SecurityApplication(out.aumid))return false;
+        if(SecurityApplication(out.aumid)||ShellSurfaceApplication(out.aumid))return false;
     }
     catch (...)
     {

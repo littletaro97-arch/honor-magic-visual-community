@@ -226,6 +226,11 @@ try
             fixture.Rename(); await Until(s => Found(s, fixture.Title)); Require("owned-window-title-event", true);
             var inspection=await backend.Request("window-action",new{windowId=id,action="inspect"});
             Require("owned-window-inspect-verified",inspection.GetProperty("accepted").GetBoolean()&&inspection.GetProperty("pid").GetString()==Environment.ProcessId.ToString()&&inspection.GetProperty("created").GetString()!.Length>0&&inspection.GetProperty("path").GetString()!.Length>0);
+            fixture.Cloak(true);await Until(s=>!Found(s,fixture.Title));Require("owned-cloaked-window-leaves-window-list",true);
+            Require("owned-cloak-keeps-hwnd-visible-but-hidden-by-dwm",fixture.IsCloaked());
+            fixture.Cloak(false);var uncloaked=await Until(s=>Found(s,fixture.Title));Require("owned-uncloaked-window-returns-to-window-list",true);
+            Require("owned-uncloak-clears-dwm-cloak-state",!fixture.IsCloaked());
+            id=uncloaked.GetProperty("windows").EnumerateArray().Single(w=>w.GetProperty("title").GetString()==fixture.Title).GetProperty("id").GetString()!;
             fixture.Taskbar(false);await Until(s=>!Found(s,fixture.Title));Require("noactivate-window-without-taskbar-opt-in-is-excluded",true);
             fixture.Taskbar(true);var restored=await Until(s=>Found(s,fixture.Title));id=restored.GetProperty("windows").EnumerateArray().Single(w=>w.GetProperty("title").GetString()==fixture.Title).GetProperty("id").GetString()!;
             fixture.RenameTo("Windows 默认锁屏界面 - owned ordinary fixture");await Until(s=>Found(s,fixture.Title));Require("ordinary-title-is-not-a-security-window-filter",true);
@@ -378,10 +383,14 @@ sealed class Fixture : IDisposable
     public void RenameTo(string title) { Title = title; Native.SetWindowText(hwnd, Title); }
     public void Rename() { Title += "-renamed"; Native.SetWindowText(hwnd, Title); }
     public void Taskbar(bool enabled){Native.SetWindowLongPtr(hwnd,-20,new IntPtr(enabled?0x08040000:0x08000000));Native.NotifyWinEvent(0x800A,hwnd,0,0);}
+    public void Cloak(bool value){int flag=value?1:0;Marshal.ThrowExceptionForHR(Native.DwmSetWindowAttribute(hwnd,13,ref flag,4));}
+    public bool IsCloaked(){Marshal.ThrowExceptionForHR(Native.DwmGetWindowAttribute(hwnd,14,out uint state,4));return state!=0;}
     public void Dispose() { if (hwnd != IntPtr.Zero) Native.PostMessage(hwnd, 0x10, IntPtr.Zero, IntPtr.Zero); thread.Join(2000); ready.Dispose(); }
 }
 static class Native
 {
+    [DllImport("dwmapi.dll")]internal static extern int DwmSetWindowAttribute(IntPtr hwnd,uint attribute,ref int value,uint size);
+    [DllImport("dwmapi.dll")]internal static extern int DwmGetWindowAttribute(IntPtr hwnd,uint attribute,out uint value,uint size);
     [DllImport("user32.dll")]internal static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll",CharSet=CharSet.Unicode)]internal static extern IntPtr FindWindowEx(IntPtr parent,IntPtr after,string cls,string? title);
     [DllImport("user32.dll")]internal static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);

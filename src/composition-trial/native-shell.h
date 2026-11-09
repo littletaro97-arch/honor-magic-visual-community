@@ -4,6 +4,7 @@
 #include <dwmapi.h>
 #include "native-toolbar-assets.h"
 #include "native-dissolve.h"
+#include "native-notification-hints.h"
 inline JsonObject ShellObject(JsonObject const &data, wchar_t const *key)
 {
     auto value = data.TryLookup(key);
@@ -501,9 +502,10 @@ struct NativeShell
         RefreshPreview();RequestIcons();
         if(Bool(data,L"magicNotificationQuiet")&&toast&&toast->visible&&Str(toast->Data(),L"sourceWidget")==L"@magic/notifications")toast->Hide(false);
         auto sessionStatus=Str(data,L"notificationSessionStatus");
-        if(!sessionStatus.empty()&&sessionStatus!=notificationSessionStatus){
+        if(sessionStatus!=notificationSessionStatus){
+            bool show=NativeNotificationHints::SessionStatus(Bool(data,L"notificationAccess"),notificationSessionStatus,sessionStatus);
             notificationSessionStatus=sessionStatus;
-            Info(data,L"通知会话",sessionStatus,L"@magic/notifications");
+            if(show)Info(data,L"通知会话",sessionStatus,L"@magic/notifications");
         }
         auto playerValue = data.TryLookup(L"player"), notificationValue = data.TryLookup(L"notification");
         auto player =
