@@ -1,0 +1,38 @@
+; MagicCommunity process guard driver
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ProviderName%
+CatalogFile=MagicProcessGuard.cat
+DriverVer=11/10/2026,0.4.11.0
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%ProviderName%=MagicCommunity,NTamd64
+
+[MagicCommunity.NTamd64]
+%DeviceName%=MagicGuard_Install, root\MagicProcessGuard
+
+[MagicGuard_Install.NT]
+CopyFiles=MagicGuard_CopyFiles
+
+[MagicGuard_CopyFiles]
+MagicProcessGuard.sys
+
+[MagicGuard_Install.NT.Services]
+AddService=MagicProcessGuard,%SPSVCINST_ASSOCSERVICE%,MagicGuard_Service
+
+[MagicGuard_Service]
+DisplayName=%ServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\MagicProcessGuard.sys
+
+[Strings]
+ProviderName="MagicCommunity"
+ServiceName="MagicCommunity Process Guard"
+DeviceName="MagicCommunity Process Guard"

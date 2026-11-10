@@ -1,5 +1,6 @@
 #pragma once
 #include "system.h"
+#include "memory-governor.h"
 #include <winrt/Windows.Foundation.h>
 
 namespace magic::system

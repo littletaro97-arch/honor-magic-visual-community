@@ -18,6 +18,7 @@ public sealed class CommunityPreferences
     public bool FadePages{get;set;}=true;
     public bool WindowAnimations{get;set;}=true;
     public bool ReduceOnBatterySaver{get;set;}=true;
+    public bool WorkingSetTrim{get;set;}=true;
     public bool FolderAnimations{get;set;}=true;
     public bool DockDissolve{get;set;}=false;
     public static CommunityPreferences Load(string root){try{string path=Path.Combine(root,"data/ui-preferences.json");if(!File.Exists(path)||new FileInfo(path).Length>16384)return new();return JsonSerializer.Deserialize<CommunityPreferences>(File.ReadAllText(path))??new();}catch(Exception e)when(e is IOException or JsonException or UnauthorizedAccessException){return new();}}

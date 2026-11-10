@@ -1,7 +1,8 @@
-param([switch]$BuildOnly)
+param([switch]$BuildOnly,[switch]$Integrated)
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-$build=& (Join-Path $PSScriptRoot 'build-native-system.ps1')|ConvertFrom-Json
+$buildArgs=@{Integrated=[bool]$Integrated}
+$build=& (Join-Path $PSScriptRoot 'build-native-system.ps1') @buildArgs|ConvertFrom-Json
 $out=$build.output
 $env:DOTNET_CLI_HOME=Join-Path $root 'tools/dotnet-home';$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1';$env:DOTNET_CLI_TELEMETRY_OPTOUT='1';$env:DOTNET_NOLOGO='1'
 $dotnet=Join-Path $root 'tools/dotnet/dotnet.exe';$project=Join-Path $root 'tools/dev/native-system-check/NativeSystemCheck.csproj'

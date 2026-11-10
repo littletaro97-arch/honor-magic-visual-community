@@ -10,6 +10,8 @@
 #include "../../tools/review/native-popup-navigation-checks.h"
 #include "../../tools/review/native-dock-reorder-checks.h"
 #include "../../tools/review/native-toolbar-release-checks.h"
+#include "../../tools/review/native-gallery-variadic-checks.h"
+#include "../../tools/review/native-gallery-remaining-checks.h"
 // Render the live D2D painters to a bounded bitmap. This developer entry never
 // creates HWNDs, connects to the bridge, reads layout/settings or takes a lease.
 inline void AppearancePng(Graphics &g,std::wstring const &file,float width,float height,float dpi,

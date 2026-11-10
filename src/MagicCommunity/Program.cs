@@ -105,6 +105,17 @@ public static class Program
             if(args.Contains("--update-window-checks")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(CommunityUpdateTests.Run(Path.Combine(root,"update-gallery")),StateStore.Json),null);return 0;}
             if(args.Contains("--desktop-grid-settings-test")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(DesktopGridSettingsTests.Run(root),StateStore.Json),null);return 0;}
             if(args.Contains("--self-test")){SelfTests.Run(root,report??Path.Combine(root,"evidence/preview/self-test.json"));return 0;}
+            if(args.Contains("--pure-natural-test")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(PureNaturalTests.Run(root),StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-config-test")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(PureNaturalConfigTests.Run(root),StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-service-fixture")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(PureNaturalServiceFixture.Run(root),StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-migration-fixture")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(PureNaturalMigrationFixture.Run(root),StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-schedule-test")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(PureNaturalSchedulerTests.Run(root),StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-operations-test")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(PureNaturalOperationsTests.Run(root),StateStore.Json),null);return 0;}
+            if(args.Contains("--process-guard-fixture")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(ProcessGuardFixture.Run(),StateStore.Json),null);return 0;}
+            if(args.Contains("--memory-service-fixture")){StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(MemoryServiceFixture.Run(),StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-apply")){var policy=PureNaturalConfig.Load(root);if(policy.Mode!="apply")throw new InvalidDataException("pure-natural.json 需要 mode=apply 才会执行服务与迁移动作。");var outcome=PureNaturalOperations.Apply(root,policy);StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(outcome,StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-rollback")){var outcome=PureNaturalOperations.Rollback(root,Argument(args,"--receipt")??throw new ArgumentException("Missing --receipt"));StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(outcome,StateStore.Json),null);return 0;}
+            if(args.Contains("--pure-natural-runtime-test")){var runtime=PureNaturalDiagnostics.Run(root,Argument(args,"--native-backend"),CancellationToken.None).GetAwaiter().GetResult();StateStore.AtomicWrite(Path.GetFullPath(report??throw new ArgumentException("Missing --report")),JsonSerializer.Serialize(runtime,StateStore.Json),null);return 0;}
             if(args.Contains("--native-taskbar-recover")){
                 string head=Path.Combine(root,".git/HEAD");if(!File.Exists(head)||File.ReadAllText(head).Trim()!="ref: refs/heads/main")throw new InvalidOperationException("Taskbar recovery requires the main workspace.");
                 NativeTaskbarRecovery.RecoverStale(Path.Combine(root,"runtime/system/native-taskbar"));return 0;
@@ -132,6 +143,8 @@ public static class Program
                 new NativeWpfTheme().ApplyInteractions(app.Resources);
                 app.Resources.MergedDictionaries.Add(new ResourceDictionary{Source=new Uri("/MagicCommunity;component/ScrollbarStyles.xaml",UriKind.Relative)});
                 using var cancellation=new CancellationTokenSource();
+                using var pureNatural=PureNaturalEngine.Start(controller);
+                using var pureNaturalSchedule=PureNaturalScheduler.Start(PureNaturalConfig.Load(root),(name,value)=>controller.Log(name,value));
                 MainWindow? main=null;
                 MainWindow Main()
                 {
@@ -163,6 +176,7 @@ public static class Program
                         Process.Start(stop);
                     },compositionRenderer:nativeRendering,showAbout:()=>OpenSettings("关于"));
                     if(nativeRendering)composition=CompositionDesktopRuntime.Start(controller,bridge,args.Contains("--logon"));
+                    pureNatural.RequestInteractionTrim();
                     main?.Hide();
                 }
 

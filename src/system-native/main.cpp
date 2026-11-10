@@ -17,6 +17,7 @@ struct Endpoint
     std::shared_ptr<BluetoothProvider> bluetooth;
     std::shared_ptr<NotificationProvider> notifications;
     std::shared_ptr<ConfigurationProvider> configuration;
+    std::shared_ptr<MemoryGovernor> memory;
     HANDLE parent;
     Handle pipe;
     DWORD parentPid;
@@ -42,6 +43,7 @@ struct Endpoint
           bluetooth(owner ? owner->bluetooth : std::make_shared<BluetoothProvider>(b.wake)),
           notifications(owner ? owner->notifications : std::make_shared<NotificationProvider>(b.wake, dataDirectory)),
           configuration(owner ? owner->configuration : std::make_shared<ConfigurationProvider>(dataDirectory, b.wake)),
+          memory(owner ? owner->memory : std::make_shared<MemoryGovernor>()),
           parent(p), parentPid(pid), timing(owner ? owner->timing : std::make_shared<Timing>()),
           eventChannel(owner != nullptr && !urgent && !devices), urgentChannel(urgent), deviceChannel(devices)
     {
@@ -181,6 +183,7 @@ struct Endpoint
     {
         auto health = broker.Health();
         health.Insert(L"tray", tray->Health());
+        health.Insert(L"memory", memory->Health());
         health.Insert(L"audio", audio->Health());
         health.Insert(L"brightness", brightness->Health());
         health.Insert(L"microphone", microphone->Health());
@@ -203,6 +206,8 @@ struct Endpoint
     }
     void Unsubscribe()
     {
+        // Unsubscribe reverses freezes before unrelated providers are detached.
+        memory->ResumeAll();
         {
             JsonObject args;
             Flag(args, L"enabled", false);
@@ -241,6 +246,11 @@ struct Endpoint
             throw std::invalid_argument("Unsupported protocol");
         auto op = RequiredText(request, L"operation", 32);
         auto args = request.GetNamedObject(L"arguments", JsonObject{});
+        // Memory governance is deliberately unavailable on urgent/event/device channels.
+        bool memoryOperation = op == L"memory-health" || op == L"memory-clean" ||
+                               op == L"process-freeze" || op == L"process-resume";
+        if (memoryOperation && (eventChannel || urgentChannel || deviceChannel))
+            throw std::invalid_argument("Memory operations require the ordinary control channel");
         int deviceOperation=op.rfind(L"wifi-",0)==0?1:op.rfind(L"bluetooth-",0)==0?2:0;
         if(deviceChannel!=deviceOperation)throw std::invalid_argument("Device operations require the independent device channel");
         std::unique_lock<std::recursive_mutex> deviceLock(deviceOperation==2?timing->bluetoothGate:timing->wifiGate,std::defer_lock);if(deviceOperation)deviceLock.lock();
@@ -253,6 +263,15 @@ struct Endpoint
             throw std::invalid_argument("Event channel accepts only next");
         if (!eventChannel && op == L"next")
             throw std::invalid_argument("Use the independent event channel");
+        // One shared governor across endpoint adapters owns all frozen process handles.
+        if (op == L"memory-health")
+            return memory->Health();
+        if (op == L"memory-clean")
+            return memory->Clean(args);
+        if (op == L"process-freeze")
+            return memory->Freeze(args, parentPid, parent);
+        if (op == L"process-resume")
+            return memory->Resume(args);
         if (op == L"configuration-catalog")
             return ConfigurationProvider::Catalog();
         if (op == L"configuration-launch-targets")

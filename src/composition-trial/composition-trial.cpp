@@ -1,3 +1,4 @@
+#include "../../tools/review/native-gallery-variadic-checks.h"
 #include "trial-ole.h"
 #include "trial-uia.h"
 #include "trial.h"

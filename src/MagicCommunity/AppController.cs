@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace MagicCommunity;
 public sealed class AppController
 {
-    public const string Version = "0.4.9";
+    public const string Version = "0.4.11";
     public bool DesktopActive { get; set; }
     public string PowerMode { get; internal set; }="暂不可用";
     public string Root { get; }

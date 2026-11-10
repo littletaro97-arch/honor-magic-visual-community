@@ -101,8 +101,9 @@ def main():
         raise RuntimeError("Explicit root process is not running")
     root_names = {pid: initial[pid]["name"] for pid in args.roots}
     root_identities = {pid: read_process(pid).get("creation_filetime") for pid in args.roots}
-    if any(not name.lower().startswith(("seelen", "slu")) for name in root_names.values()):
-        raise RuntimeError("Root PID is not a Seelen/slu executable")
+    allowed_roots = ("seelen", "slu", "magiccommunity", "magicsystemnative", "magicnativeentry", "magiccompositionhost")
+    if any(not Path(name).name.lower().startswith(allowed_roots) for name in root_names.values()):
+        raise RuntimeError("Root PID is not a supported community/Seelen executable")
     if C.sizeof(Counters) != 96:
         raise RuntimeError("This probe requires x64 EX2 layout")
     samples, previous = [], {}

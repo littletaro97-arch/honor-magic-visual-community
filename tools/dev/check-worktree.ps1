@@ -24,7 +24,7 @@ try{
     Run-Check 'restore' $dotnet @('restore',$project,'--ignore-failed-sources','--nologo')
     $app=Join-Path $output 'app'
     Run-Check 'publish' $dotnet @('publish',$project,'--no-restore','-c','Release','--self-contained','false','-o',$app,'--nologo')
-    $tests=if($BuildOnly){@()}else{@('self-test','desktop-card-test','custom-card-test','desktop-refresh-test','desktop-group-test','clipboard-move-data-test')}
+    $tests=if($BuildOnly){@()}else{@('self-test','pure-natural-test','pure-natural-config-test','pure-natural-operations-test','pure-natural-schedule-test','process-guard-fixture','memory-service-fixture','pure-natural-migration-fixture','pure-natural-service-fixture','desktop-card-test','custom-card-test','desktop-refresh-test','desktop-group-test','clipboard-move-data-test')}
     $results=@()
     foreach($test in $tests){
         $report=Join-Path $output ($test+'.json')
