@@ -16,6 +16,9 @@ struct NativeMenus {
     POINT origin{};
     bool closing=false;
     std::wstring style,rootAlignX=L"Start",rootAlignY=L"Start";
+    // Which bar item opened this cascade, and what that item looked like when it did.
+    // A standing menu is rebuilt from the item that owns it, never from a guessed one.
+    std::wstring itemKey,itemStamp;HWND itemBar=nullptr;
     std::function<void(size_t,std::wstring const&)> choose,prepare;
     std::function<void()> dismiss;
     std::function<bool(ID2D1DeviceContext*,std::wstring const&,D2D1_RECT_F)> icon;
@@ -32,7 +35,7 @@ struct NativeMenus {
     }
     void Close(bool notify=true){
         if(closing)return;
-        closing=true;NativeOwnSurfaceVeil(app,origin,false);auto callback=std::move(dismiss);choose={};prepare={};HideFrom(0);icon={};closing=false;
+        closing=true;NativeOwnSurfaceVeil(app,origin,false);auto callback=std::move(dismiss);choose={};prepare={};HideFrom(0);icon={};itemKey.clear();itemStamp.clear();itemBar=nullptr;closing=false;
         if(notify&&callback)callback();
     }
     void Begin(POINT point,std::wstring menuStyle,std::function<void(size_t,std::wstring const&)> action,std::function<void()> cancel){
@@ -51,6 +54,9 @@ struct NativeMenus {
             level.opened=id;
             level.opening=Str(row,L"control")==L"submenu";
             if(auto children=row.TryLookup(L"children");children&&children.ValueType()==JsonValueType::Array){Show(depth+1,children.GetArray());return;}
+            // Repaint before reporting: the reader sees the new tick under the cursor,
+            // and the adapter's answer only has to agree with it.
+            if(Bool(row,L"keepOpen")&&row.HasKey(L"checked"))Tick(depth,id);
             auto callback=choose;if(callback)callback(depth,id);return;
         }
     }
@@ -68,8 +74,84 @@ struct NativeMenus {
     }
     void ReplaceRoot(JsonArray const &values){
         if(levels.empty()||!levels[0].popup->visible){Show(0,values);return;}
-        HideFrom(1);auto &level=levels[0];level.values=values;auto &popup=*level.popup;
-        popup.SetContextRows(values);
+        // Rebuilding the root used to cut every level below it. The caller that
+        // refreshes a standing menu now keeps the reader where they are.
+        Rebuild(values);
+    }
+    // A tick row is one alternative in a small set. Reporting the click and closing
+    // turns a run of tries into "reopen, find the submenu, try again", so a row that
+    // carries keepOpen repaints with the new tick and leaves the level standing.
+    bool Persistent(size_t depth,std::wstring const &id)const{
+        if(depth>=visibleLevels||depth>=levels.size())return false;
+        for(auto const &v:levels[depth].values){auto row=v.GetObject();if(Str(row,L"id")==id)return Bool(row,L"keepOpen");}
+        return false;
+    }
+    void Tick(size_t depth,std::wstring const &id){
+        if(depth>=visibleLevels||depth>=levels.size())return;
+        auto &level=levels[depth];
+        // A solo row is a state switch that shares a level with a radio group (the
+        // colour/glyph switch sits above the 39-vendor list): picking it must not
+        // clear the vendor tick, and picking a vendor must not clear it.
+        bool solo=false;for(auto const &v:level.values){auto row=v.GetObject();if(Str(row,L"id")==id&&Bool(row,L"independent"))solo=true;}
+        for(auto const &v:level.values){auto row=v.GetObject();if(!row.HasKey(L"checked"))continue;
+            // A row outside the level's radio group keeps its own state when a sibling
+            // is picked; a two-state row flips itself instead of claiming the click as
+            // a new selection.
+            bool clicked=Str(row,L"id")==id,independent=Bool(row,L"independent");
+            bool next=clicked?(Bool(row,L"toggle")?!Bool(row,L"checked"):true):(solo||independent?Bool(row,L"checked"):false);
+            row.Insert(L"checked",JsonValue::CreateBooleanValue(next));}
+        // The same in-place re-layout Rebuild() uses: the reader picked a row in a
+        // list they had scrolled to, so the level must come back at the same offset
+        // instead of jumping to the top under the cursor.
+        float scroll=level.popup?level.popup->ContextScrollOffset():0.f;bool shown=level.popup&&level.popup->visible;
+        if(level.popup)level.popup->SetContextRows(level.values);
+        if(shown)level.popup->SetContextScrollOffset(scroll);
+    }
+    struct LevelAnchor{POINT point{};RECT parentRect{};float rowAnchor=0;};
+    // Where a level hangs from: the root sits on the pointer, a child on the right
+    // edge of the row that opened it. Show() and Rebuild() share this, so a rebuilt
+    // level lands exactly where reopening it would.
+    LevelAnchor Anchor(size_t depth){
+        LevelAnchor result;result.point=origin;result.rowAnchor=static_cast<float>(origin.y);
+        if(!depth||depth>levels.size())return result;
+        auto &parent=*levels[depth-1].popup;RECT rect{};if(parent.AnimatedContext())rect=parent.ContentScreenRect();else GetWindowRect(parent.hwnd,&rect);
+        result.point={rect.right-static_cast<LONG>(4*parent.dpi/96),rect.top};
+        for(auto const &row:parent.rows)if(row.id==levels[depth-1].opened)result.point.y+=static_cast<LONG>((row.rect.top-10)*parent.dpi/96);
+        result.parentRect=rect; // The popup selects its side after measuring its final multi-column width.
+        result.rowAnchor=result.point.y+22*parent.dpi/96;
+        return result;
+    }
+    // Rebuild every open level from freshly generated root values while keeping the
+    // submenu each level has open. The ids are generated by the same code in the same
+    // order, so following the parent's opened id into the new children restores the
+    // stack. A level whose parent row no longer has children ends the stack there.
+    void Rebuild(JsonArray const &values){
+        if(levels.empty()||!levels[0].popup||!levels[0].popup->visible)return;
+        std::vector<std::wstring> trail;for(size_t i=0;i<visibleLevels&&i<levels.size();++i)trail.push_back(levels[i].opened);
+        JsonArray current=values;size_t keep=0;
+        for(size_t depth=0;depth<trail.size()&&depth<levels.size();++depth){
+            auto &level=levels[depth];
+            level.values=current;level.opened=trail[depth];level.opening=false;
+            // Re-anchor from the parent as it stands now, not from where it stood when
+            // the level first opened: an in-place rebuild must land like a reopen.
+            if(depth&&level.popup){
+                auto anchor=Anchor(depth);auto payload=level.popup->packet.GetNamedObject(L"payload");JsonObject position;
+                Put(position,L"x",static_cast<double>(anchor.point.x));Put(position,L"y",static_cast<double>(anchor.point.y));payload.Insert(L"desiredPosition",position);
+                Put(payload,L"contextAnchorY",static_cast<double>(anchor.rowAnchor));
+                Put(payload,L"contextParentLeft",static_cast<double>(anchor.parentRect.left));Put(payload,L"contextParentRight",static_cast<double>(anchor.parentRect.right));
+            }
+            float scroll=level.popup?level.popup->ContextScrollOffset():0.f;bool shown=level.popup&&level.popup->visible;
+            if(level.popup)level.popup->SetContextRows(current);
+            if(shown)level.popup->SetContextScrollOffset(scroll);
+            ++keep;
+            if(trail[depth].empty())break;
+            JsonArray children{};bool found=false;
+            for(auto const &v:current){auto row=v.GetObject();if(Str(row,L"id")!=trail[depth])continue;
+                if(auto value=row.TryLookup(L"children");value&&value.ValueType()==JsonValueType::Array){children=value.GetArray();found=children.Size()>0;}break;}
+            if(!found){level.opened.clear();break;}
+            current=children;
+        }
+        if(keep<visibleLevels)HideFrom(keep);
     }
     void Show(size_t depth,JsonArray const &values){
         if(depth>16||!values.Size())return;
@@ -77,14 +159,7 @@ struct NativeMenus {
         HideFrom(depth+1);
         while(levels.size()<=depth){Level level;level.popup=std::make_unique<NativePopup>(app);levels.push_back(std::move(level));}
         auto &p=*levels[depth].popup;
-        POINT point=origin;RECT parentRect{};bool flipped=false;float rowAnchor=static_cast<float>(origin.y);
-        if(depth){
-            auto &parent=*levels[depth-1].popup;RECT rect{};if(parent.AnimatedContext())rect=parent.ContentScreenRect();else GetWindowRect(parent.hwnd,&rect);
-            point={rect.right-static_cast<LONG>(4*parent.dpi/96),rect.top};
-            for(auto const &row:parent.rows)if(row.id==levels[depth-1].opened)point.y+=static_cast<LONG>((row.rect.top-10)*parent.dpi/96);
-            parentRect=rect; // The popup selects its side after measuring its final multi-column width.
-            rowAnchor=point.y+22*parent.dpi/96;
-        }
+        auto anchor=Anchor(depth);POINT point=anchor.point;RECT parentRect=anchor.parentRect;bool flipped=false;float rowAnchor=anchor.rowAnchor;
         p.contextDismiss={};p.contextFamily=[this](HWND hwnd){return Family(hwnd);};
         levels[depth].values=values;visibleLevels=std::max(visibleLevels,depth+1);
         JsonObject packet,data,payload,position;

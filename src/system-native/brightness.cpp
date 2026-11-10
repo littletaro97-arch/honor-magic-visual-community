@@ -4,9 +4,11 @@
 #include <functional>
 #include <physicalmonitorenumerationapi.h>
 #include <highlevelmonitorconfigurationapi.h>
+#include <powrprof.h>
 #include <cwctype>
 #pragma comment(lib,"dxva2.lib")
 #pragma comment(lib,"wbemuuid.lib")
+#pragma comment(lib,"powrprof.lib")
 // Public Windows WMI monitor classes. No polling, screen overlay or gamma ramp.
 namespace magic::system {
 namespace {
@@ -39,10 +41,35 @@ double ApplyPhysicalBrightness(BrightnessPhysical const &physical,std::wstring c
     if(!QueryPhysicalBrightness(physical.handle,minimum,current,maximum))throw std::runtime_error("External brightness readback failed");
     return (current-minimum)/static_cast<double>(maximum-minimum);
 }
+// Windows reports a brightness change without saying who asked for it: the WMI event
+// carries only Active/Brightness, and the ambient sensor moves the very same value the
+// brightness keys do. So the shell keeps quiet unless the write was ours, and the flag
+// below is what tells a hand from a sensor when someone asks. Read it per power source,
+// because the setting is stored twice.
+//
+// The scheme has to be named explicitly: on this Windows build a null SchemeGuid comes
+// back as ERROR_INVALID_PARAMETER, which silently reads as "adaptive is off". Unknown
+// answers report "off" so a machine without the setting still gets an honest value.
+bool AdaptiveBrightness(){
+    GUID *scheme=nullptr;
+    if(PowerGetActiveScheme(nullptr,&scheme)!=ERROR_SUCCESS||!scheme)return false;
+    SYSTEM_POWER_STATUS power{};
+    bool ac=GetSystemPowerStatus(&power)&&power.ACLineStatus!=0;
+    GUID subgroup{0x7516b95f,0xf776,0x4464,{0x8c,0x53,0x06,0x16,0x7f,0x40,0xcc,0x99}};
+    GUID setting{0xfbd9aa66,0x9553,0x4097,{0xba,0x44,0xed,0x6e,0x9d,0x65,0xea,0xb8}};
+    DWORD index=0;
+    HRESULT result=ac?PowerReadACValueIndex(nullptr,scheme,&subgroup,&setting,&index)
+                     :PowerReadDCValueIndex(nullptr,scheme,&subgroup,&setting,&index);
+    LocalFree(scheme);
+    return SUCCEEDED(result)&&index!=0;
+}
 struct BrightnessState{
     std::mutex gate;std::atomic<bool> active{false};std::shared_ptr<ChangeState> changes;
     struct Item{
         std::wstring id,path;unsigned value=0;
+        // Wall clock of the last write we made, so the read that follows can say
+        // "this one was the user" instead of leaving the shell to guess.
+        ULONGLONG manualUntil=0;
         std::wstring monitor,name,monitorKey;bool primary=false,available=true;double inches=0;LONG width=0,height=0;
         std::shared_ptr<BrightnessPhysical> physical;DWORD minimum=0,maximum=100;
     };
@@ -154,8 +181,9 @@ BrightnessProvider::~BrightnessProvider(){impl->Stop();}
 JsonObject BrightnessProvider::Read(bool refresh){
     if(refresh){{std::scoped_lock lock(impl->gate);if(impl->state->active)impl->Collect();else impl->Start();}impl->state->changes->Notify(2048);}
     JsonObject result;JsonArray displays;std::scoped_lock lock(impl->state->gate);
-    bool available=false;for(auto const &[id,item]:impl->state->items){JsonObject row;Text(row,L"id",id);Number(row,L"value",item.value/100.0);Text(row,L"monitorId",item.monitor);Text(row,L"name",item.name);Flag(row,L"primary",item.primary);Flag(row,L"available",item.available);Text(row,L"transport",item.physical?L"ddc":item.path.empty()?L"unsupported":L"wmi");Number(row,L"diagonalInches",item.inches);Number(row,L"widthPx",item.width);Number(row,L"heightPx",item.height);available|=item.available;displays.Append(row);}
-    Flag(result,L"available",impl->state->active&&available);Flag(result,L"events",impl->events);result.Insert(L"displays",displays);return result;
+    ULONGLONG now=GetTickCount64();
+    bool available=false;for(auto const &[id,item]:impl->state->items){JsonObject row;Text(row,L"id",id);Number(row,L"value",item.value/100.0);Text(row,L"monitorId",item.monitor);Text(row,L"name",item.name);Flag(row,L"primary",item.primary);Flag(row,L"available",item.available);Text(row,L"transport",item.physical?L"ddc":item.path.empty()?L"unsupported":L"wmi");Number(row,L"diagonalInches",item.inches);Number(row,L"widthPx",item.width);Number(row,L"heightPx",item.height);Flag(row,L"manual",item.manualUntil>now);available|=item.available;displays.Append(row);}
+    Flag(result,L"available",impl->state->active&&available);Flag(result,L"events",impl->events);Flag(result,L"adaptive",AdaptiveBrightness());result.Insert(L"displays",displays);return result;
 }
 JsonObject BrightnessProvider::Subscribe(bool enabled){
     std::scoped_lock lock(impl->gate);
@@ -169,7 +197,7 @@ JsonObject BrightnessProvider::Set(JsonObject const &args){
     {std::scoped_lock data(impl->state->gate);auto it=impl->state->items.find(id);if(it==impl->state->items.end()||!it->second.available)throw std::invalid_argument("Brightness display is no longer available");item=it->second;}
     if(item.physical){
         double actual=ApplyPhysicalBrightness(*item.physical,item.monitor,item.monitorKey,value);
-        {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id))impl->state->items[id].value=static_cast<unsigned>(std::lround(actual*100));}
+        {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id)){impl->state->items[id].value=static_cast<unsigned>(std::lround(actual*100));impl->state->items[id].manualUntil=GetTickCount64()+2500;}}
         impl->state->changes->Notify(2048);JsonObject result;Flag(result,L"accepted",true);Number(result,L"value",actual);return result;
     }
     if(!impl->service||item.path.empty())throw std::invalid_argument("Brightness display is no longer available");
@@ -183,7 +211,7 @@ JsonObject BrightnessProvider::Set(JsonObject const &args){
     VARIANT level{};level.vt=VT_UI1;level.bVal=static_cast<BYTE>(std::lround(value*100));winrt::check_hresult(input->Put(L"Brightness",0,&level,0));
     winrt::check_hresult(impl->service->ExecMethod(WmiString(item.path.c_str()).get(),WmiString(L"WmiSetBrightness").get(),0,nullptr,input.get(),output.put(),nullptr));
     ValidateBrightnessResult(outputSignature.get(),output.get());
-    {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id))impl->state->items[id].value=level.bVal;}
+    {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id)){impl->state->items[id].value=level.bVal;impl->state->items[id].manualUntil=GetTickCount64()+2500;}}
     impl->state->changes->Notify(2048);JsonObject result;Flag(result,L"accepted",true);Number(result,L"value",level.bVal/100.0);return result;
 }
 }

@@ -1,0 +1,655 @@
+{
+  "schemaVersion": 1,
+  "generatedFrom": "iconify",
+  "vendors": [
+    {
+      "slug": "honor-ring",
+      "name": "HONOR 荣耀之环",
+      "files": [
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "local:user-supplied (official 2026 lockup honor-2.svg, symbol subpaths extracted)"
+      ]
+    },
+    {
+      "slug": "apple",
+      "name": "Apple 苹果",
+      "files": [
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "simple-icons:apple"
+      ]
+    },
+    {
+      "slug": "samsung",
+      "name": "Samsung 三星",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:samsung",
+        "simple-icons:samsung"
+      ]
+    },
+    {
+      "slug": "huawei",
+      "name": "Huawei 华为",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:huawei",
+        "simple-icons:huawei"
+      ]
+    },
+    {
+      "slug": "honor",
+      "name": "HONOR 荣耀",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "simple-icons:honor (mono wordmark)",
+        "thesvg-color:honor (wordmark path)",
+        "local:magiccommunity (Moving Color gradient tint, official palette #FF00D0/#4E73FF/#00B1FF/#00FFFF)"
+      ]
+    },
+    {
+      "slug": "xiaomi",
+      "name": "Xiaomi 小米",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:xiaomi",
+        "simple-icons:xiaomi"
+      ]
+    },
+    {
+      "slug": "oppo",
+      "name": "OPPO",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:oppo",
+        "simple-icons:oppo"
+      ]
+    },
+    {
+      "slug": "vivo",
+      "name": "vivo",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:vivo",
+        "simple-icons:vivo"
+      ]
+    },
+    {
+      "slug": "oneplus",
+      "name": "OnePlus 一加",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:oneplus",
+        "simple-icons:oneplus"
+      ]
+    },
+    {
+      "slug": "realme",
+      "name": "realme 真我",
+      "files": [
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "worldvectorlogo:realme-1"
+      ]
+    },
+    {
+      "slug": "meizu",
+      "name": "Meizu 魅族",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:meizu",
+        "simple-icons:meizu"
+      ]
+    },
+    {
+      "slug": "zte",
+      "name": "ZTE 中兴",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:zte",
+        "simple-icons:zte"
+      ]
+    },
+    {
+      "slug": "nokia",
+      "name": "Nokia 诺基亚",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:nokia",
+        "simple-icons:nokia"
+      ]
+    },
+    {
+      "slug": "motorola",
+      "name": "Motorola 摩托罗拉",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:motorola",
+        "simple-icons:motorola"
+      ]
+    },
+    {
+      "slug": "sony",
+      "name": "Sony 索尼",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:sony",
+        "simple-icons:sony"
+      ]
+    },
+    {
+      "slug": "google",
+      "name": "Google 谷歌",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "logos:google",
+        "simple-icons:google"
+      ]
+    },
+    {
+      "slug": "microsoft",
+      "name": "Microsoft 微软",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:microsoft",
+        "simple-icons:microsoft"
+      ]
+    },
+    {
+      "slug": "lenovo",
+      "name": "Lenovo 联想",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:lenovo",
+        "simple-icons:lenovo"
+      ]
+    },
+    {
+      "slug": "thinkpad",
+      "name": "ThinkPad",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:thinkpad",
+        "simple-icons:thinkpad"
+      ]
+    },
+    {
+      "slug": "asus",
+      "name": "ASUS 华硕",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:asus",
+        "simple-icons:asus"
+      ]
+    },
+    {
+      "slug": "rog",
+      "name": "ASUS ROG 玩家国度",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "simple-icons:republicofgamers"
+      ]
+    },
+    {
+      "slug": "acer",
+      "name": "Acer 宏碁",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:acer",
+        "simple-icons:acer"
+      ]
+    },
+    {
+      "slug": "dell",
+      "name": "Dell 戴尔",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:dell",
+        "simple-icons:dell"
+      ]
+    },
+    {
+      "slug": "alienware",
+      "name": "Alienware 外星人",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:alienware",
+        "simple-icons:alienware"
+      ]
+    },
+    {
+      "slug": "hp",
+      "name": "HP 惠普",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:hp",
+        "simple-icons:hp"
+      ]
+    },
+    {
+      "slug": "msi",
+      "name": "MSI 微星",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:msi",
+        "simple-icons:msi"
+      ]
+    },
+    {
+      "slug": "razer",
+      "name": "Razer 雷蛇",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:razer",
+        "simple-icons:razer"
+      ]
+    },
+    {
+      "slug": "toshiba",
+      "name": "Toshiba 东芝",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:toshiba",
+        "simple-icons:toshiba"
+      ]
+    },
+    {
+      "slug": "fujitsu",
+      "name": "Fujitsu 富士通",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:fujitsu",
+        "simple-icons:fujitsu"
+      ]
+    },
+    {
+      "slug": "lg",
+      "name": "LG 乐金",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:lg",
+        "simple-icons:lg"
+      ],
+      "note": "face mark only; the L/G letterforms are cropped out of the lockup"
+    },
+    {
+      "slug": "sharp",
+      "name": "Sharp 夏普",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:sharp",
+        "simple-icons:sharp"
+      ]
+    },
+    {
+      "slug": "blackberry",
+      "name": "BlackBerry 黑莓",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:blackberry",
+        "simple-icons:blackberry"
+      ]
+    },
+    {
+      "slug": "framework",
+      "name": "Framework",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:framework",
+        "simple-icons:framework"
+      ]
+    },
+    {
+      "slug": "system76",
+      "name": "System76",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "thesvg-color:system76",
+        "simple-icons:system76"
+      ]
+    },
+    {
+      "slug": "tecno",
+      "name": "TECNO 传音",
+      "files": [
+        "color.svg"
+      ],
+      "sources": [
+        "thesvg-color:tecno"
+      ]
+    },
+    {
+      "slug": "mechrevo",
+      "name": "MECHREVO 机械革命",
+      "files": [
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "local:user-supplied (official lockup PNG, glyph cropped & vectorized)"
+      ]
+    },
+    {
+      "slug": "firebat",
+      "name": "Firebat 火影",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "local:user-supplied (official homepage logo, vectorized)"
+      ]
+    },
+    {
+      "slug": "firebat-word",
+      "name": "FIREBAT 火影字标",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "local:user-supplied (official homepage wordmark, vectorized)"
+      ]
+    },
+    {
+      "slug": "ipason",
+      "name": "iPASON 攀升",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "local:user-supplied (official site logo, vectorized)"
+      ]
+    },
+    {
+      "slug": "ipason-word",
+      "name": "iPASON 攀升字标",
+      "files": [
+        "color.svg",
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "local:user-supplied (lid badge photo geometry, letter glyphs rebuilt from Arial Black outline)"
+      ]
+    },
+    {
+      "slug": "predator",
+      "name": "Acer Predator 掠夺者",
+      "files": [
+        "mono-light.svg",
+        "mono-dark.svg"
+      ],
+      "sources": [
+        "logoquake:acer-predator (claw emblem cut from the lockup; the vendor mark has no colour cut)"
+      ]
+    }
+  ],
+  "skipped": [
+    {
+      "slug": "redmi",
+      "reason": "no icon found"
+    },
+    {
+      "slug": "iqoo",
+      "reason": "no icon found"
+    },
+    {
+      "slug": "gigabyte",
+      "reason": "no icon found"
+    },
+    {
+      "slug": "nothing",
+      "reason": "no icon found"
+    },
+    {
+      "slug": "infinix",
+      "reason": "no icon found"
+    },
+    {
+      "slug": "tcl",
+      "reason": "no icon found"
+    }
+  ],
+  "collectionLicences": {
+    "ic": "Apache 2.0",
+    "mdi": "Apache 2.0",
+    "tabler": "MIT",
+    "iconoven": "MIT",
+    "coolicons": "MIT",
+    "mingcute": "Apache 2.0",
+    "ri": "Apache 2.0",
+    "andrsrxn": "MIT",
+    "griddy-icons": "MIT",
+    "iconoir": "MIT",
+    "lucide": "ISC",
+    "lucide-extended": "ISC",
+    "uil": "Apache 2.0",
+    "tdesign": "MIT",
+    "si": "MIT",
+    "flowbite": "MIT",
+    "vadivam": "MIT",
+    "basil": "CC BY 4.0",
+    "pixelarticons": "MIT",
+    "pixel": "CC BY 4.0",
+    "proicons": "MIT",
+    "meteor-icons": "MIT",
+    "prime": "MIT",
+    "circum": "Mozilla Public License 2.0",
+    "uim": "Apache 2.0",
+    "duo-icons": "MIT",
+    "iconmind": "MIT",
+    "withicons": "MIT",
+    "simple-icons": "CC0 1.0",
+    "logos": "CC0",
+    "cib": "CC0 1.0",
+    "thesvg": "MIT",
+    "thesvg-color": "MIT",
+    "cbi": "CC BY-NC-SA 4.0",
+    "arcticons": "CC BY-SA 4.0",
+    "grommet-icons": "Apache 2.0",
+    "gravity-ui": "MIT",
+    "hugeicons": "MIT",
+    "selfhst": "CC BY 4.0",
+    "ep": "MIT",
+    "game-icons": "CC BY 3.0",
+    "pinhead": "CC0",
+    "cryptocurrency": "CC0 1.0",
+    "cryptocurrency-color": "CC0 1.0",
+    "file-icons": "ISC",
+    "mynaui": "MIT",
+    "gg": "MIT",
+    "akar-icons": "MIT",
+    "fe": "MIT",
+    "uit": "Apache 2.0",
+    "mage": "Apache 2.0",
+    "lineicons": "MIT",
+    "icon-park-outline": "Apache 2.0",
+    "icon-park-solid": "Apache 2.0",
+    "icon-park-twotone": "Apache 2.0",
+    "jam": "MIT",
+    "ant-design": "MIT",
+    "bi": "MIT",
+    "formkit": "MIT",
+    "teenyicons": "MIT",
+    "pajamas": "MIT",
+    "streamline": "CC BY 4.0",
+    "picon": "Open Font License",
+    "streamline-color": "CC BY 4.0",
+    "icon-park": "Apache 2.0",
+    "material-icon-theme": "MIT",
+    "devicon": "MIT",
+    "devicon-plain": "MIT",
+    "codicon": "CC BY 4.0",
+    "fa7-brands": "CC BY 4.0",
+    "bxl": "MIT",
+    "la": "Apache 2.0",
+    "fa6-brands": "CC BY 4.0",
+    "fa-brands": "CC BY 4.0",
+    "fontisto": "MIT",
+    "ion": "MIT",
+    "famicons": "MIT",
+    "f7": "MIT",
+    "streamline-ultimate-color": "CC BY 4.0",
+    "streamline-logos": "CC BY 4.0",
+    "fluent-mdl2": "MIT",
+    "lets-icons": "CC BY 4.0",
+    "raphael": "MIT",
+    "token": "MIT",
+    "token-branded": "MIT",
+    "healthicons": "MIT",
+    "material-symbols": "Apache 2.0",
+    "material-symbols-light": "Apache 2.0",
+    "humbleicons": "MIT",
+    "zondicons": "MIT",
+    "carbon": "Apache 2.0",
+    "vscode-icons": "MIT",
+    "glyphs": "MIT",
+    "glyphs-poly": "MIT",
+    "fa7-solid": "CC BY 4.0",
+    "ci": "CC BY 4.0",
+    "fa7-regular": "CC BY 4.0",
+    "garden": "Apache 2.0",
+    "circle-flags": "MIT",
+    "keyline-icons": "MIT",
+    "wpf": "MIT",
+    "streamline-ultimate": "CC BY 4.0",
+    "streamline-freehand": "CC BY 4.0",
+    "streamline-freehand-color": "CC BY 4.0"
+  }
+}

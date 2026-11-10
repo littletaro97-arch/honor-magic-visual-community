@@ -37,7 +37,9 @@ internal static class NativeSystemPresentation
     };
     private static readonly Dictionary<string, (string Label, string Icon)> Modules = new()
     {
-        ["magic.user"] = ("用户", "FaRegCircleUser"),
+        // 账户与标识: the cross-brand reading of SeelenUI's "账户" module - the mark,
+        // the machine name and the account menu all live behind this one cell.
+        ["magic.user"] = ("账户与标识", "FaRegCircleUser"),
         ["magic.power-menu"] = ("电源", "IoPower"),
         ["magic.clock"] = ("时间", "IoTimeOutline"),
         ["magic.tray"] = ("系统托盘", "IoChevronDownCircleOutline"),
@@ -62,6 +64,31 @@ internal static class NativeSystemPresentation
         ["magic.focused-title"] = ("窗口标题", "IoDesktopOutline")
     };
     private static JsonNode? Copy(JsonElement value) => JsonNode.Parse(value.GetRawText());
+    // The settings page lists exactly what the bar menu lists; reading one table keeps
+    // the two in step when a module is added or renamed.
+    internal static IReadOnlyDictionary<string, (string Label, string Icon)> ModuleCatalog => Modules;
+    // "当前应用" and "窗口标题" lead with a mark that separates the name from what comes
+    // before them. Which mark is a preference, so it is written into the copy the renderer
+    // receives; the stored view keeps describing the row as it was built, which is what
+    // lets the choice be switched back afterwards.
+    internal static void ApplyFocusedSeparator(JsonObject view, string separator)
+    {
+        if (separator is not ("bar" or "none")) separator = "desktop";
+        if (view["toolbar"] is not JsonObject groups) return;
+        foreach (string section in Sections)
+        {
+            if (groups[section] is not JsonArray rows) continue;
+            foreach (var node in rows)
+            {
+                if (node is not JsonObject row) continue;
+                if (row["nativeModule"] is not JsonValue module || module.GetValue<string>() is not ("magic.focused-app" or "magic.focused-title")) continue;
+                if (row["content"] is not JsonArray content || content.Count == 0 || content[0] is not JsonObject mark) continue;
+                if (mark["kind"] is not JsonValue kind || kind.GetValue<string>() != "icon") continue;
+                if (separator == "none") content.RemoveAt(0);
+                else mark["value"] = separator == "bar" ? "MagicSeparatorBar" : "IoDesktopOutline";
+            }
+        }
+    }
     private static string Text(JsonElement value, string key, string fallback = "") => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString()! : fallback;
     private static bool Flag(JsonElement value, string key, bool fallback = false) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) && field.ValueKind is JsonValueKind.True or JsonValueKind.False ? field.GetBoolean() : fallback;
     private static double Number(JsonElement value, string key, double fallback = 0) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.Number && field.TryGetDouble(out double n) && double.IsFinite(n) ? n : fallback;
@@ -200,16 +227,26 @@ internal static class NativeSystemPresentation
                         warnings.Add(new JsonObject { ["item"] = id, ["reason"] = "compatibility-execution-deferred" });
                     }
                     else throw new InvalidDataException("Unknown presentation item kind.");
+                    bool rowAdded=false;
                     if(interactive && surfaceName=="toolbar" && kind=="module" && Text(item,"module")=="magic.tray")
                     {
                         row["module"]=id;
-                        foreach(var icon in Array(Provider(providers,"tray"),"icons").Where(x=>Flag(x,"promoted")))
+                        // The tray is one group whose button sits at its outer edge, so in the left
+                        // group the block is mirrored: the button comes first and the icons follow
+                        // in reverse. The renderer suppresses its own mirror while a drag is in
+                        // flight, so both orders have to describe the same arrangement here or the
+                        // button visibly jumps sides the moment the drop republishes.
+                        var promoted=Array(Provider(providers,"tray"),"icons").Where(x=>Flag(x,"promoted")).ToArray();
+                        bool mirrored=section=="left";
+                        if(mirrored){rows.Add(row);rowAdded=true;}
+                        IEnumerable<JsonElement> order=mirrored?promoted.Reverse():promoted;
+                        foreach(var icon in order)
                         {
                             string trayId="tray:"+Text(icon,"id");
-                            rows.Add(new JsonObject{["id"]=trayId,["key"]=trayId,["type"]="Tray",["module"]=id,["nativeTrayId"]=Text(icon,"id"),["imageVersion"]=Text(icon,"imageVersion"),["label"]=Text(icon,"tooltip"),["tooltip"]=Text(icon,"tooltip"),["icon"]="native:tray",["path"]=Text(icon,"executable"),["ownerHwnd"]=ulong.Parse(Text(icon,"ownerHwnd"),CultureInfo.InvariantCulture),["enabled"]=Flag(icon,"actionAvailable")});
+                            rows.Add(new JsonObject{["id"]=trayId,["key"]=trayId,["type"]="Tray",["module"]=id,["nativeTrayId"]=Text(icon,"id"),["stableId"]=Text(icon,"stableId"),["imageVersion"]=Text(icon,"imageVersion"),["label"]=Text(icon,"tooltip"),["tooltip"]=Text(icon,"tooltip"),["icon"]="native:tray",["path"]=Text(icon,"executable"),["ownerHwnd"]=ulong.Parse(Text(icon,"ownerHwnd"),CultureInfo.InvariantCulture),["enabled"]=Flag(icon,"actionAvailable")});
                         }
                     }
-                    rows.Add(row);
+                    if(!rowAdded)rows.Add(row);
                 }
             }
             result[surfaceName] = groups;
@@ -223,8 +260,12 @@ internal static class NativeSystemPresentation
         if(interactive){result["dockSettings"]!["showEndTask"]=false;if(Flag(snapshot,"uacPending"))result["dock"]!["right"]!.AsArray().Add(new JsonObject{["id"]="native:authorization",["key"]="native:authorization",["type"]="Uac",["label"]="Windows 授权请求",["enabled"]=true});}
         var catalog=new JsonArray();foreach(var (name,details) in Modules)catalog.Add(new JsonObject{["id"]=name,["label"]=details.Label,["icon"]=details.Icon});
         result["toolbarModules"]=new JsonArray(catalog.Where(v=>v!["id"]!.GetValue<string>()!="magic.player").Select(v=>v!.DeepClone()).ToArray());result["dockModules"]=new JsonArray(catalog.Where(v=>v!["id"]!.GetValue<string>()!="magic.music").Select(v=>v!.DeepClone()).ToArray());
-        var notifications=Provider(providers,"notifications");result["notificationAccess"]=Flag(notifications,"available")&&Text(notifications,"access")=="allowed";
-        var latest=Array(notifications,"notifications").OrderByDescending(n=>Text(n,"createdFileTime")).FirstOrDefault();
+        // This package carries no package identity of its own on some machines, so the
+        // listener answers "allowed" only when Windows granted the independent identity;
+        // plain "available" was true even while every read came back empty.
+        var notifications=Provider(providers,"notifications");result["notificationAccess"]=Flag(notifications,"independentIdentity")&&Text(notifications,"access")=="allowed";
+        // A toast the sender withdrew must not be re-announced once its ghost expires.
+        var latest=Flag(notifications,"announceLatest")?Array(notifications,"notifications").OrderByDescending(n=>Text(n,"createdFileTime")).FirstOrDefault():default;
         if(latest.ValueKind==JsonValueKind.Object)result["notification"]=new JsonObject{["key"]=Text(latest,"id"),["title"]=Text(latest,"appName"),["detail"]=string.Join("\n",Array(latest,"text").Select(n=>n.GetString()??""))};
         var audio = Provider(providers, "audio"); if (Flag(audio, "available")) result["volume"] = Number(audio, "volume");
         return result;

@@ -13,7 +13,40 @@ internal sealed partial class NativeSystemUiSession
 {
     private readonly List<JsonObject> orderReceipts = [];
     private readonly Dictionary<string, string> customIcons = new(StringComparer.Ordinal);
-    private static readonly HashSet<string> SettingsUris = new(StringComparer.Ordinal) { "ms-settings:", "ms-settings:bluetooth", "ms-settings:network-wifi", "ms-settings:sound", "ms-settings:powersleep", "ms-settings:notifications", "ms-settings:regionlanguage", "ms-settings:dateandtime", "ms-settings:privacy-notifications", "ms-settings:display", "ms-settings:nightlight" };
+    // Row id -> how the left cell is composed: which bundled mark (assets/brand-icons),
+    // whether the mark is hidden, and where the wordmark comes from. Kept apart from
+    // customIcons because one is a compiled-in name and the other a file on disk.
+    internal sealed record BrandOverride(string? Icon, bool IconHidden, string Label, string Text, string Style, string Device)
+    {
+        internal static readonly BrandOverride Empty = new(null, false, "brand", "", "mono", "");
+    }
+    private readonly Dictionary<string, BrandOverride> brandIcons = new(StringComparer.Ordinal);
+    // The corner is drawn from the published view, so a brand edit has to go out as a
+    // new view. Evicting the bitmap cache alone only ever refreshed imported images,
+    // which is why picking a bundled mark used to do nothing until something else
+    // happened to republish.
+    private async Task RefreshBrand(string id)
+    {
+        BrandOverride? current = null; lock (brandIcons) brandIcons.TryGetValue(id, out current);
+        log("brand_refresh", new { id, icon = current?.Icon, label = current?.Label, style = current?.Style, device = current?.Device, hidden = current?.IconHidden });
+        if (CurrentView.ValueKind == JsonValueKind.Object) await Publish(JsonNode.Parse(CurrentView.GetRawText())!.AsObject(), stop.Token);
+        string? publishedIcon = null, publishedLabel = null, publishedStyle = null;
+        if (CurrentView.ValueKind == JsonValueKind.Object)
+            foreach (var row in Array(Object(CurrentView, "toolbar"), "left"))
+                if (Text(row, "id") == id) { publishedIcon = Text(row, "brandIcon"); publishedLabel = Text(row, "brandLabel"); publishedStyle = Text(row, "brandStyle"); }
+        log("brand_published", new { icon = publishedIcon, label = publishedLabel, style = publishedStyle, publishes = Interlocked.Read(ref shellPublishes), duplicates = Interlocked.Read(ref shellDuplicates) });
+        await send(new { type = "icons-invalidated", keys = new[] { id } });
+    }
+    private void StoreBrand(string id, Func<BrandOverride, BrandOverride> change)
+    {
+        lock (brandIcons)
+        {
+            brandIcons.TryGetValue(id, out var current);
+            brandIcons[id] = change(current ?? BrandOverride.Empty);
+            StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "brand-icons.json"), JsonSerializer.Serialize(brandIcons), null);
+        }
+    }
+    private static readonly HashSet<string> SettingsUris = new(StringComparer.Ordinal) { "ms-settings:", "ms-settings:bluetooth", "ms-settings:network-wifi", "ms-settings:sound", "ms-settings:powersleep", "ms-settings:notifications", "ms-settings:regionlanguage", "ms-settings:dateandtime", "ms-settings:privacy-notifications", "ms-settings:display", "ms-settings:nightlight", "ms-settings:network", "ms-settings:privacy-location" };
     private async Task LocalCommand(Command action, JsonElement result, string token)
     {
         var args = JsonSerializer.SerializeToElement(action.Arguments);
@@ -31,6 +64,24 @@ internal sealed partial class NativeSystemUiSession
                 }
                 break;
             case "apps-item": case "apps-control": await AppsCommand(action, result, token); break;
+            case "account-open":
+                {
+                    string target = Text(args, "target");
+                    // One row can be a settings page or the task manager; both are
+                    // vetted here rather than in the renderer, which only knows a label.
+                    if (target == "taskmgr")
+                        OpenUri(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "Taskmgr.exe"));
+                    else if (!SettingsUris.Contains(target)) throw new InvalidDataException("Settings destination differs.");
+                    else OpenUri(target);
+                    break;
+                }
+            case "account-tune":
+                // Shape and position are judged against the card, so the panel opens
+                // beside it rather than in the settings window. The command runs off
+                // the popup pipeline, which is not the UI thread, and a Window cannot
+                // be created on anything but STA - hence the dispatch.
+                await OpenAccountTune();
+                break;
             case "settings-uri": string uri = Text(args, "uri"); if (!SettingsUris.Contains(uri)) throw new InvalidDataException("Settings destination differs."); OpenUri(uri); break;
             case "panel": await popups.Close(stop.Token); await Open(Text(args, "kind"), args); break;
             case "appearance-theme":
@@ -51,6 +102,30 @@ internal sealed partial class NativeSystemUiSession
             case "app-launch": await popups.Close(stop.Token); Launch(args, false); break;
             default: throw new InvalidDataException("Local action is not offered.");
         }
+    }
+    // The panel's window is created without activating it, then the card is told to
+    // hold it, and only then is it shown. Activation before that hold would read as
+    // the reader clicking away and dismiss the card this panel exists to tune.
+    private async Task OpenAccountTune()
+    {
+        if (host is null) return;
+        AccountCardSettingsWindow? window = null;
+        long handle = await ui.InvokeAsync(() =>
+        {
+            window = new AccountCardSettingsWindow(host);
+            return new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle().ToInt64();
+        });
+        if (window is null) return;
+        var opened = window;
+        // The card holds the panel's process, not just this handle: WPF may replace the
+        // HWND between EnsureHandle and Show, and the panel is still the same reader.
+        Volatile.Write(ref tuning, opened);
+        opened.Closed += (_, _) => { if (ReferenceEquals(Volatile.Read(ref tuning), opened)) Volatile.Write(ref tuning, null); };
+        // The handle is named before Show can take focus; a card that is not shown yet
+        // inherits the same hold in its first packet once its receipt lands.
+        if (handle != 0 && host.HoldCard is { } hold) await hold(handle);
+        try { await ui.InvokeAsync(() => opened.Show()); }
+        catch { if (ReferenceEquals(Volatile.Read(ref tuning), opened)) Volatile.Write(ref tuning, null); throw; }
     }
     private async Task<bool> TrayAction(string iconId, string action, double x, double y)
     {
@@ -145,6 +220,21 @@ internal sealed partial class NativeSystemUiSession
     {
         string verb = Text(command, "verb"), id = Text(command, "id"), destination = Text(command, "destination"), token = Text(command, "orderToken");
         if(verb=="toggle-extension"){if(surface!="toolbar")throw new InvalidOperationException("外部扩展仅支持顶栏。");await ToggleExtension(destination);return;}
+        if (verb == "reset-icon") { await ResetCustomIcon(id); return; }
+        if (verb == "set-brand-icon") { await SetBrandIcon(id, destination); return; }
+        if (verb == "set-brand-device") { await SetBrandDevice(id, destination); return; }
+        if (verb == "set-brand-style") { if (id.Length > 0) { StoreBrand(id, e => e with { Style = destination == "color" ? "color" : "mono" }); await RefreshBrand(id); } return; }
+        if (verb == "set-brand-label") { await SetBrandLabel(id, destination); return; }
+        if (verb == "set-brand-icon-hide") { if (id.Length > 0) { StoreBrand(id, e => e with { IconHidden = destination == "1" }); await RefreshBrand(id); } return; }
+        // The layout switch lives in the bar's own menu, so it is a bar command rather
+        // than a settings window toggle: write the preference, then republish the view.
+        if (verb == "set-menu-layout") { var look = CommunityPreferences.Load(deployment.Root); look.ContextMenuColumns = destination == "columns"; look.Save(deployment.Root); await RefreshPreferences(stop.Token); return; }
+        // The separator belongs to the focused rows, so its switch lives on them; it is
+        // the same preference the settings window writes.
+        if (verb == "set-focused-separator") { var look = CommunityPreferences.Load(deployment.Root); look.FocusedSeparator = destination is "bar" or "none" ? destination : "desktop"; look.Save(deployment.Root); await RefreshPreferences(stop.Token); return; }
+        // T39: the switch lives on the tray button's own menu; the renderer reads it
+        // from the preferences projection, so publishing the view is the whole write.
+        if (verb == "set-toolbar-drag-button-only") { var look = CommunityPreferences.Load(deployment.Root); look.ToolbarDragButtonOnly = destination != "off"; look.Save(deployment.Root); await RefreshPreferences(stop.Token); return; }
         if (verb == "windows-settings") { OpenUri("ms-settings:"); return; }
         if (verb == "settings") { await ui.InvokeAsync(() => community("settings")).Task.Unwrap(); return; }
         if (verb is "edit-icon" or "edit-custom-icon") { await EditIcon(id); return; }
@@ -172,9 +262,8 @@ internal sealed partial class NativeSystemUiSession
             else if (verb is "toggle-module" or "toggle-media")
             {
                 string module = verb == "toggle-media" ? "magic.player" : destination;
-                var catalog = await backend.Request("configuration-catalog", new { }, stop.Token); if (!Array(catalog, "modules").Any(m => m.ValueKind == JsonValueKind.String ? m.GetString() == module : Text(m, "id") == module)) throw new InvalidDataException("模块不在内置目录中。");
-                bool removed = false; foreach (string group in new[] { "left", "center", "right" }) { var list = sections[group]!.AsArray(); for (int n = list.Count - 1; n >= 0; --n) if (list[n]!["module"]?.GetValue<string>() == module) { list.RemoveAt(n); removed = true; } }
-                if (!removed) sections[surface == "toolbar" ? "right" : "center"]!.AsArray().Add(new JsonObject { ["id"] = surface + ":" + module, ["kind"] = "module", ["module"] = module });
+                await RequireModule(module);
+                ApplyModule(sections, surface, module, !ModulePresent(sections, module));
             }
             else if (verb == "remove")
             {
@@ -187,10 +276,70 @@ internal sealed partial class NativeSystemUiSession
                 foreach (string group in new[] { "left", "center", "right" }) { var list = sections[group]!.AsArray(); for (int n = 0; n < list.Count; ++n) if (list[n]!["id"]!.GetValue<string>() == anchor) { list.Insert(n + (destination.StartsWith("after:", StringComparison.Ordinal) ? 1 : 0), separator); inserted = true; break; } if (inserted) break; }
                 if (!inserted) sections["center"]!.AsArray().Add(separator);
             }
-            else throw new InvalidOperationException("此菜单动作尚未连接独立配置。");
+            else { log("bar_command_unhandled", new { verb, destination, id, surface }); throw new InvalidOperationException("此菜单动作尚未连接独立配置。"); }
             await SaveConfiguration(config); if (token.Length > 0) { lock (orderReceipts) { orderReceipts.Add(new() { ["token"] = token, ["ok"] = true,["revision"]=config["revision"]!.GetValue<long>() }); while (orderReceipts.Count > 32) orderReceipts.RemoveAt(0); } }
         }
         catch (Exception error) { if (token.Length > 0) { lock (orderReceipts) { orderReceipts.Add(new() { ["token"] = token, ["ok"] = false, ["error"] = error.Message }); while (orderReceipts.Count > 32) orderReceipts.RemoveAt(0); } } throw; }
+        finally { configurationGate.Release(); }
+    }
+    // One place decides what "this module is on" means, so the bar menu and the
+    // settings page cannot disagree about where a row lives.
+    private static bool ModulePresent(JsonObject sections, string module)
+    {
+        foreach (string group in new[] { "left", "center", "right" })
+            foreach (var row in sections[group]!.AsArray())
+                if (row!["module"]?.GetValue<string>() == module) return true;
+        return false;
+    }
+    private static void ApplyModule(JsonObject sections, string surface, string module, bool enabled)
+    {
+        foreach (string group in new[] { "left", "center", "right" })
+        {
+            var list = sections[group]!.AsArray();
+            for (int n = list.Count - 1; n >= 0; --n) if (list[n]!["module"]?.GetValue<string>() == module) list.RemoveAt(n);
+        }
+        if (enabled) sections[surface == "toolbar" ? "right" : "center"]!.AsArray().Add(new JsonObject { ["id"] = surface + ":" + module, ["kind"] = "module", ["module"] = module });
+    }
+    private async Task RequireModule(string module)
+    {
+        var catalog = await backend.Request("configuration-catalog", new { }, stop.Token);
+        if (!Array(catalog, "modules").Any(m => m.ValueKind == JsonValueKind.String ? m.GetString() == module : Text(m, "id") == module)) throw new InvalidDataException("模块不在内置目录中。");
+    }
+    // The settings window has no pipe of its own, so it borrows this one: the catalog
+    // it lists and the state it shows come from the same configuration the bar edits.
+    internal async Task<IReadOnlyList<BarModuleState>> ReadBarModules(CancellationToken token)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, stop.Token);
+        await configurationGate.WaitAsync(linked.Token);
+        try
+        {
+            var read = await backend.Request("configuration-read", new { }, linked.Token);
+            var config = JsonNode.Parse(read.GetProperty("configuration").GetRawText())!.AsObject();
+            var toolbar = config["toolbar"]!["sections"]!.AsObject(); var dock = config["dock"]!["sections"]!.AsObject();
+            var rows = new List<BarModuleState>();
+            foreach (var (id, details) in NativeSystemPresentation.ModuleCatalog)
+                rows.Add(new BarModuleState(id, details.Label, details.Icon, ModulePresent(toolbar, id), ModulePresent(dock, id)));
+            rows.Sort((a, b) => StringComparer.CurrentCulture.Compare(a.Label, b.Label));
+            return rows;
+        }
+        finally { configurationGate.Release(); }
+    }
+    // A module can live on both surfaces, so the caller always names the one it means.
+    internal async Task SetBarModule(string surface, string module, bool enabled, CancellationToken token)
+    {
+        if (surface is not ("toolbar" or "dock")) throw new InvalidDataException("只有顶栏和任务栏有模块。");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, stop.Token);
+        await RequireModule(module);
+        await configurationGate.WaitAsync(linked.Token);
+        try
+        {
+            var read = await backend.Request("configuration-read", new { }, linked.Token);
+            var config = JsonNode.Parse(read.GetProperty("configuration").GetRawText())!.AsObject();
+            var sections = config[surface]!["sections"]!.AsObject();
+            if (ModulePresent(sections, module) == enabled) return;
+            ApplyModule(sections, surface, module, enabled);
+            await SaveConfiguration(config);
+        }
         finally { configurationGate.Release(); }
     }
     private async Task SaveConfiguration(JsonObject config)
@@ -198,10 +347,111 @@ internal sealed partial class NativeSystemUiSession
         long prior = config["revision"]!.GetValue<long>(); config["revision"] = prior + 1;
         await backend.Request("configuration-write", new { expectedRevision = prior, configuration = config }, stop.Token);
     }
+    // A bundled brand mark is a name, not a file, so the renderer can draw it from
+    // its baked asset table and the user never manages an image.
+    private async Task SetBrandIcon(string id, string slug)
+    {
+        if (id.Length == 0 || slug.Length == 0 || slug.Length > 64) return;
+        // Picking a bundled mark supersedes an imported file for the same row.
+        lock (customIcons) if (customIcons.Remove(id)) StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "custom-icons.json"), JsonSerializer.Serialize(customIcons), null);
+        StoreBrand(id, e => e with { Icon = slug, IconHidden = false });
+        await RefreshBrand(id);
+    }
+    // The default entry is not one glyph but a family: a laptop or a desktop. Choosing
+    // either clears any vendor mark, so the corner falls back to the device shape.
+    private async Task SetBrandDevice(string id, string device)
+    {
+        if (id.Length == 0) return;
+        string shape = device == "desktop" ? "desktop" : "";
+        lock (customIcons) if (customIcons.Remove(id)) StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "custom-icons.json"), JsonSerializer.Serialize(customIcons), null);
+        StoreBrand(id, e => e with { Icon = null, Device = shape, Style = "mono", IconHidden = false });
+        await RefreshBrand(id);
+    }
+    // Dropping the entry is enough: the next icon request resolves the built-in glyph
+    // again, and icons-invalidated evicts the cached bitmap.
+    // The wordmark is independent of the mark: vendor name, this PC's name, typed
+    // text, or nothing at all.
+    private async Task SetBrandLabel(string id, string mode)
+    {
+        if (id.Length == 0) return;
+        if (mode == "custom")
+        {
+            string current; lock (brandIcons) current = brandIcons.TryGetValue(id, out var existing) ? existing.Text : "";
+            string? text = await ui.InvokeAsync(() => PromptText("自定义字标", current));
+            if (text is null) return;
+            // An empty box is a deliberate "no wordmark", not a cancel.
+            StoreBrand(id, e => e with { Label = text.Length == 0 ? "none" : "custom", Text = text });
+        }
+        else
+        {
+            if (mode is not ("brand" or "host" or "none")) return;
+            StoreBrand(id, e => e with { Label = mode });
+        }
+        await RefreshBrand(id);
+    }
+    // Small modal prompt; the bar menus cannot collect text themselves. It has to be
+    // topmost: this app has no visible owner window, so a plain dialog opens behind
+    // whatever the user runs fullscreen and the modal loop then looks like a freeze.
+    private static string? PromptText(string title, string initial)
+    {
+        string? result = null;
+        var window = new System.Windows.Window
+        {
+            Title = title, Width = 380, SizeToContent = System.Windows.SizeToContent.Height,
+            WindowStartupLocation = System.Windows.WindowStartupLocation.CenterScreen,
+            ResizeMode = System.Windows.ResizeMode.NoResize, ShowInTaskbar = false,
+            Topmost = true, ShowActivated = true,
+        };
+        var panel = new System.Windows.Controls.StackPanel { Margin = new System.Windows.Thickness(16) };
+        var box = new System.Windows.Controls.TextBox { Text = initial, MaxLength = 32 };
+        var ok = new System.Windows.Controls.Button { Content = "确定", IsDefault = true, Width = 88, Margin = new System.Windows.Thickness(0, 12, 0, 0), HorizontalAlignment = System.Windows.HorizontalAlignment.Right };
+        ok.Click += (_, _) => { result = box.Text.Trim(); window.Close(); };
+        window.PreviewKeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Escape) window.Close(); };
+        window.Loaded += (_, _) => { window.Activate(); box.Focus(); };
+        panel.Children.Add(new System.Windows.Controls.TextBlock { Text = "字标文字（留空表示不显示字标）", Margin = new System.Windows.Thickness(0, 0, 0, 8) });
+        panel.Children.Add(box);
+        panel.Children.Add(ok);
+        window.Content = panel;
+        box.SelectAll();
+        window.ShowDialog();
+        return result;
+    }
+    // Both stores are cleared: an imported image and a bundled mark are two ways to
+    // override the same glyph, so "reset" has to drop whichever is present.
+    private async Task ResetCustomIcon(string id)
+    {
+        if (id.Length == 0) return;
+        bool removed = false;
+        lock (brandIcons) if (brandIcons.Remove(id)) { removed = true; StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "brand-icons.json"), JsonSerializer.Serialize(brandIcons), null); }
+        lock (customIcons) if (customIcons.Remove(id)) { removed = true; StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "custom-icons.json"), JsonSerializer.Serialize(customIcons), null); }
+        if (!removed) return;
+        await RefreshBrand(id);
+    }
+    // Bounds mirror what the renderer can consume: one decodable frame, at most 4096
+    // pixels per edge, and a file small enough to ship as a data URI.
+    private static void ValidateIconFile(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) throw new InvalidDataException("图标文件不存在。");
+        if (info.Length == 0) throw new InvalidDataException("图标文件是空的。");
+        if (info.Length > 4 * 1024 * 1024) throw new InvalidDataException($"图标文件 {info.Length / 1024} KB，超过 4 MB 上限。");
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var decoder = System.Windows.Media.Imaging.BitmapDecoder.Create(stream, System.Windows.Media.Imaging.BitmapCreateOptions.IgnoreColorProfile, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+            if (decoder.Frames.Count == 0) throw new InvalidDataException("图标里没有可用的图像帧。");
+            var frame = decoder.Frames[0];
+            if (frame.PixelWidth is < 1 or > 4096 || frame.PixelHeight is < 1 or > 4096) throw new InvalidDataException($"图标尺寸 {frame.PixelWidth}×{frame.PixelHeight} 超出 1–4096 像素。");
+        }
+        catch (Exception e) when (e is not InvalidDataException and not OutOfMemoryException) { throw new InvalidDataException("无法解码这个文件，请换一张 PNG 或 ICO。"); }
+    }
     private async Task EditIcon(string id)
     {
-        string? path = await ui.InvokeAsync(() => { var picker = new OpenFileDialog { Title = "选择图标", Filter = "图标或图片|*.ico;*.png;*.jpg;*.jpeg;*.webp;*.exe;*.lnk", CheckFileExists = true }; return picker.ShowDialog() == true ? picker.FileName : null; }); if (path is null) return;
+        string? path = await ui.InvokeAsync(() => { var picker = new OpenFileDialog { Title = "选择图标", Filter = "图标或图片|*.ico;*.png;*.jpg;*.jpeg;*.bmp", CheckFileExists = true }; return picker.ShowDialog() == true ? picker.FileName : null; }); if (path is null) return;
+        // Validate before storing, otherwise an unreadable file looks like the import
+        // silently did nothing.
+        ValidateIconFile(path);
         lock (customIcons) { if (customIcons.Count >= 256 && !customIcons.ContainsKey(id)) throw new InvalidOperationException("自定义图标已达到数量上限。"); customIcons[id] = path; StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "custom-icons.json"), JsonSerializer.Serialize(customIcons), null); }
-        await send(new { type = "icons-invalidated", keys = new[] { id } });
+        await RefreshBrand(id);
     }
 }

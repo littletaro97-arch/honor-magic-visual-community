@@ -12,6 +12,22 @@ public sealed record Display(string Id, string Label, string Device, int X, int 
     public int PixelHeight{get;init;}
     public uint Dpi { get; init; }
     public string HardwareIdentity { get; init; } = "";
+
+    // ── P0 定位基准（2026-11-07）────────────────────────────────────────────
+    // 桌面宿主、顶栏、Dock 一律以「显示器全区域 rcMonitor」为基准，
+    // 不再用工作区 rcWork 当原点。
+    //
+    // 原因：rcWork 是「扣掉系统任务栏之后剩下的区域」。任务栏停靠在底部时
+    // rcWork.top 恰好等于 rcMonitor.top（=0），所以看起来是对的；一旦任务栏
+    // 换到上/左/右，rcWork 的原点就带着任务栏厚度，整个桌面和顶栏会整体偏移，
+    // 屏幕那条边空出一条。
+    //
+    // X/Y/Width/Height 仍然是 rcWork，只留给「窗口居中」这类真正需要可用区的
+    // 场景（见 Displays.Place）。顶栏自己的占位交给 AppBar 协议协商。
+    public int DesktopLeft => PixelWidth > 0 ? PixelX : X;
+    public int DesktopTop => PixelHeight > 0 ? PixelY : Y;
+    public int DesktopWidth => PixelWidth > 0 ? PixelWidth : Width;
+    public int DesktopHeight => PixelHeight > 0 ? PixelHeight : Height;
 }
 public static class Displays
 {

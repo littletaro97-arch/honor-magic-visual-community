@@ -17,12 +17,14 @@ public sealed record AccessoryProjection(double OriginX,double OriginY,double St
     {
         double width=rect.W*StepX-UnifiedDesktopGrid.Inset*StepX/96,height=rect.H*StepY-UnifiedDesktopGrid.Inset*StepX/96;
         int left=(int)Math.Round(OriginX+rect.X*StepX),top=(int)Math.Round(OriginY+rect.Y*StepY);
-        return new(display.X+left,display.Y+top,display.X+left+(int)Math.Round(width),display.Y+top+(int)Math.Round(height));
+        // P0: icon frames are relative to the monitor origin (rcMonitor),
+        // matching the desktop host window's own coordinate system.
+        return new(display.DesktopLeft+left,display.DesktopTop+top,display.DesktopLeft+left+(int)Math.Round(width),display.DesktopTop+top+(int)Math.Round(height));
     }
     public static AccessoryProjection Create(Display display,double scale,NativeDesktopSnapshot? native=null)
     {
         if(!double.IsFinite(scale)||scale is <.5 or >8)throw new LayoutEditException("屏幕缩放比例无效。");
-        double width=display.Width/scale,height=display.Height/scale;
+        double width=display.DesktopWidth/scale,height=display.DesktopHeight/scale;
         double cell=width<UnifiedDesktopGrid.Cell*6+UnifiedDesktopGrid.MarginX*2?80:UnifiedDesktopGrid.Cell;
         cell=Math.Min(cell,Math.Max(1,Math.Min(width,height)));
         int columns=Math.Clamp((int)Math.Floor(Math.Max(cell,width-2*UnifiedDesktopGrid.MarginX)/cell),1,128);
@@ -36,7 +38,7 @@ public static class AccessoryPlacement
     public static bool Overlaps(NativeIconRect a,NativeIconRect b)=>a.Left<b.Right&&a.Right>b.Left&&a.Top<b.Bottom&&a.Bottom>b.Top;
     public static bool NativeFree(GridRect rect,Display display,AccessoryProjection projection,NativeDesktopSnapshot native)
     {
-        var frame=projection.Frame(rect,display);return frame.Left>=display.X&&frame.Top>=display.Y&&frame.Right<=display.X+display.Width&&frame.Bottom<=display.Y+display.Height&&!native.Icons.Any(icon=>Overlaps(frame,icon));
+        var frame=projection.Frame(rect,display);return frame.Left>=display.DesktopLeft&&frame.Top>=display.DesktopTop&&frame.Right<=display.DesktopLeft+display.DesktopWidth&&frame.Bottom<=display.DesktopTop+display.DesktopHeight&&!native.Icons.Any(icon=>Overlaps(frame,icon));
     }
     public static void Ensure(Board board,Display display,AccessoryProjection projection,NativeDesktopSnapshot native,bool relocate)
     {

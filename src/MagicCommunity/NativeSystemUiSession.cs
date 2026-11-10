@@ -16,6 +16,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
 {
     private readonly NativeSystemDeployment deployment;
     private readonly NativeSystemClient backend;
+    private string notificationDigest = "";
     private readonly NativeNetworkPortal networkPortal;
     private readonly NativeNetworkDetails networkDetails, bluetoothDetails;
     private readonly ToolbarExtensions extensions;private int extensionProjectionQueued;
@@ -48,6 +49,8 @@ internal sealed partial class NativeSystemUiSession : IDisposable
     private View latestView = new(default);
     private JsonElement CurrentView => Volatile.Read(ref latestView).Data;
     private int expectedBars, closing;private bool mediaPopupSubscribed;
+    // Set by Start so Dispose can hand the settings window's hooks back.
+    private AppController? host;
     private volatile bool notificationQuiet;
     private Task[] work = []; private long startMenuEpoch, quickSettingsEpoch, popupGeneration;
     private NativeSystemUiSession(NativeSystemDeployment deployment, NativeSystemClient backend, CompositionShellSession shell, CompositionPopupSession popups, int renderer, Dispatcher ui, Func<string, Task> community, Func<object, Task> send, Action<string, object> log)
@@ -62,11 +65,82 @@ internal sealed partial class NativeSystemUiSession : IDisposable
         lyrics=new(QueueExtensionProjection);
         LoadPreferences(); shell.InlineImage = Image; popups.InlineImage = Image; shell.BarReady += BarReady;
     }
-    private string? Image(string id) => Volatile.Read(ref images).GetValueOrDefault(id);
+    // While the card's tuning panel is open its in-memory copy is the truth: a slider
+    // must reach the renderer without a disk write per step. Disk is written once, by
+    // the panel, when it closes.
+    private CommunityPreferences? cardDraft;
+    // The standing tuning panel, if any. The card holds this process, not one handle:
+    // WPF may replace the panel's HWND between EnsureHandle and Show.
+    private AccountCardSettingsWindow? tuning;
+    private CommunityPreferences Preferences() => Volatile.Read(ref cardDraft) ?? CommunityPreferences.Load(deployment.Root);
+    internal void SetCardDraft(CommunityPreferences? draft) => Volatile.Write(ref cardDraft, draft);
+    private static JsonObject PreferencesView(CommunityPreferences look) => new()
+    {
+        ["transparentToolbar"]=look.TransparentToolbar,
+        ["coveredBackdrop"]=look.CoveredBackdrop,
+        ["autoContrast"]=look.AutoContrast,
+        ["iconScheme"]=look.IconScheme,
+        ["windowAnimations"]=look.WindowAnimations,
+        ["folderAnimations"]=look.FolderAnimations,
+        ["brightnessHints"]=look.BrightnessHints,
+        ["brightnessFollowSystem"]=look.BrightnessFollowSystem,
+        ["showPages"]=look.ShowPages,
+        ["fadePages"]=look.FadePages,
+        ["dockDissolve"]=look.DockDissolve,
+        ["reduceOnBatterySaver"]=look.ReduceOnBatterySaver,
+        ["contextMenuLayout"]=look.ContextMenuColumns ? "columns" : "scroll",
+        ["focusedSeparator"]=look.FocusedSeparator,
+        ["toolbarDissolve"]=look.ToolbarDissolve,
+        ["toolbarDragButtonOnly"]=look.ToolbarDragButtonOnly,
+        ["accountCardWidth"]=look.AccountCardWidth,
+        ["accountCardHeight"]=look.AccountCardHeight,
+        ["accountCardX"]=look.AccountCardX,
+        ["accountCardY"]=look.AccountCardY,
+        ["accountCardRowHeight"]=look.AccountCardRowHeight,
+        ["accountCardGap"]=look.AccountCardGap,
+        ["accountCardFontSize"]=look.AccountCardFontSize,
+        ["accountCardRadius"]=look.AccountCardRadius,
+        ["accountCardOffsetX"]=look.AccountCardOffsetX,
+        ["accountCardOffsetY"]=look.AccountCardOffsetY,
+        ["accountCardMotion"]=look.AccountCardMotion
+    };
+    private string? Image(string id) => Volatile.Read(ref images).GetValueOrDefault(id) ?? CustomImage(id);
+    // Custom bar/dock icons live on disk, not in the tray image cache, so serve them
+    // here as the same PNG data URI the shell expects. Any format the WIC decoder
+    // understands is re-encoded, which keeps the renderer to a single codec.
+    private string? CustomImage(string id)
+    {
+        string? path; lock (customIcons) customIcons.TryGetValue(id, out path);
+        if (path is null) return null;
+        try
+        {
+            if (!File.Exists(path)) return null;
+            using var stream = File.OpenRead(path);
+            var decoder = System.Windows.Media.Imaging.BitmapDecoder.Create(stream, System.Windows.Media.Imaging.BitmapCreateOptions.IgnoreColorProfile, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+            if (decoder.Frames.Count == 0) return null;
+            System.Windows.Media.Imaging.BitmapSource source = decoder.Frames[0];
+            // The bar cell is 16 DIP; 512 px stays crisp at every scale without paying
+            // for the user's original resolution on every icon request.
+            double edge = Math.Max(source.PixelWidth, source.PixelHeight);
+            if (edge > 512) source = new System.Windows.Media.Imaging.TransformedBitmap(source, new System.Windows.Media.ScaleTransform(512d / edge, 512d / edge));
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(source));
+            using var output = new MemoryStream();
+            encoder.Save(output);
+            return output.Length is > 0 and < 60000 ? "data:image/png;base64," + Convert.ToBase64String(output.ToArray()) : null;
+        }
+        catch (Exception e) when (e is not OutOfMemoryException) { return null; }
+    }
     internal static async Task<NativeSystemUiSession> Start(AppController controller, NativeSystemDeployment deployment, CompositionShellSession shell, CompositionPopupSession popups, int renderer, Dispatcher ui, Func<string, Task> community, Func<object, Task> send, Action<string, object> log, CancellationToken cancellation)
     {
         var backend = await NativeSystemClient.Start(deployment.Backend, deployment.Files["MagicSystemNative.exe"], cancellation, deployment.DataDirectory);
         var owner = new NativeSystemUiSession(deployment, backend, shell, popups, renderer, ui, community, send, log);
+        // Lending the live session to the settings window keeps one writer for the bar.
+        owner.host = controller;
+        popups.TuningVisible = () => Volatile.Read(ref owner.tuning) is not null;
+        controller.ReadBarModules = owner.ReadBarModules; controller.SetBarModule = owner.SetBarModule;
+        controller.RefreshPreferences = owner.RefreshPreferences;
+        controller.RefreshCard = owner.RefreshCard; controller.CardWindow = () => owner.CardWindow; controller.HoldCard = owner.HoldCard; controller.CloseCard = owner.CloseCard; controller.CardDraft = owner.SetCardDraft;
         try
         {
             var initial = await owner.presentation.Initialize(cancellation); await owner.Publish(initial, cancellation);
@@ -91,6 +165,42 @@ internal sealed partial class NativeSystemUiSession : IDisposable
         catch { owner.Dispose(); throw; }
     }
     private void BarReady() { if (expectedBars > 0 && shell.ReadyWindowCount >= expectedBars) barsReady.TrySetResult(); }
+    // Writing ui-preferences.json only decides what the next view will say. The bar keeps
+    // the view it was last handed, so the settings window calls this after every switch.
+    internal async Task RefreshPreferences(CancellationToken token)
+    {
+        if (CurrentView.ValueKind != JsonValueKind.Object) return;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, stop.Token);
+        await Publish(JsonNode.Parse(CurrentView.GetRawText())!.AsObject(), linked.Token);
+    }
+    // The card's tuning panel edits shape while the card stands. A shell publish only
+    // carries preferences to the renderer; the standing card is a popup and needs its
+    // own repaint, which also re-runs the card's height contract. The panel throttles
+    // its calls, so this is one repaint per settled change, never a loop.
+    internal async Task RefreshCard(CancellationToken token)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, stop.Token);
+        string? cardToken;
+        lock (currentGate) cardToken = currentKind == "@magic/user-menu" ? currentToken : null;
+        if (cardToken is null) return;
+        // The card's rows carry the door switches as well as the shape, so this is the
+        // same panel the card opened with, built from the unsaved draft. Only the card
+        // is refreshed: the bars are not republished, so a drag costs one small packet.
+        var panel = NativeSystemPanel.Build("@magic/user-menu", NetworkState(presentation.State), notificationQuiet: notificationQuiet, accountCard: Preferences());
+        panel.Data["hostPid"] = Environment.ProcessId;
+        bool stale;
+        lock (currentGate) { stale = currentToken != cardToken; if (!stale) currentPanel = panel; }
+        if (stale) return;
+        // The hold repeats with every preview: a drag keeps the panel in front of the
+        // card, and each refresh restates that the panel's process is not the reader
+        // leaving.
+        int hold = Volatile.Read(ref tuning) is null ? 0 : Environment.ProcessId;
+        await popups.Update(JsonSerializer.SerializeToElement(new { token = cardToken, data = panel.Data, preferences = PreferencesView(Preferences()), holdPid = hold }), linked.Token);
+    }
+    // The panel is placed from the card's real screen rectangle, not from a guess.
+    internal long CardWindow { get { lock (currentGate) { if (currentKind != "@magic/user-menu") return 0; } return popups.Window; } }
+    internal Task CloseCard() => popups.Close(stop.Token);
+    internal Task HoldCard(long window) => popups.Hold(window, stop.Token);
     private async Task Publish(JsonObject projected, CancellationToken cancellation, bool projectionOnly = false)
     {
         if(!projectionOnly){notificationWindows.Observe(presentation.State.Snapshot);
@@ -100,10 +210,48 @@ internal sealed partial class NativeSystemUiSession : IDisposable
         lyrics.Project(projected,presentation.State.Providers.GetValueOrDefault("media"));
         projected["hostPid"]=Environment.ProcessId;
         projected["magicNotificationQuiet"]=notificationQuiet;
+        // The renderer reads these names straight out of the view (transparentToolbar,
+        // coveredBackdrop, iconScheme, the animation switches). Restating them here is
+        // what makes the settings window's switches reach the bar at all.
+        var look = Preferences();
+        projected["preferences"]=PreferencesView(look);
+        // The mark is part of the row's own content, so the choice has to reach the rows
+        // and not only the preferences block above them.
+        NativeSystemPresentation.ApplyFocusedSeparator(projected, look.FocusedSeparator);
         if(!projectionOnly){var nextImages = new Dictionary<string, string>(StringComparer.Ordinal); foreach (var icon in Array(presentation.State.Providers.GetValueOrDefault("tray"), "icons")) { string png = Text(icon, "png"); if (png.Length is > 0 and < 90000) nextImages["tray:" + Text(icon, "id")] = "data:image/png;base64," + png; }
             Volatile.Write(ref images, nextImages);}
+        // The notification centre draws straight from this array, so "the toast never
+        // arrived" and "we arrived with no words and drew an empty card" have to be
+        // told apart from the outside. One compact line per change is enough for that,
+        // and it keeps the notification text itself out of the log.
+        try
+        {
+            var rows = Array(presentation.State.Providers.GetValueOrDefault("notifications"), "notifications")
+                .Select(row => new { app = Text(row, "appName"), appId = Text(row, "appId"), lines = Array(row, "text").Length, created = Text(row, "createdFileTime") }).ToArray();
+            string digest = string.Join("|", rows.Select(row => row.appId + ":" + row.created + ":" + row.lines));
+            if (digest != notificationDigest) { notificationDigest = digest; log("notifications_snapshot", new { count = rows.Length, rows }); }
+        }
+        catch { /* A diagnostic must never break the publish. */ }
         lock (orderReceipts) { projected["orderReceipts"] = new JsonArray(orderReceipts.Select(x => (JsonNode)x.DeepClone()).ToArray()); }
         lock (customIcons) foreach (string surface in new[] { "toolbar", "dock" }) foreach (string section in new[] { "left", "center", "right" }) foreach (var row in projected[surface]![section]!.AsArray()) if (customIcons.TryGetValue(row!["id"]!.GetValue<string>(), out var image)) {row["icon"] = image;row["customIcon"]=true;}
+        // The left cell is composed on the renderer side from these five fields:
+        // which bundled mark, whether it is hidden, where the wordmark comes from,
+        // and which of the two mark styles to draw. They are restated from scratch
+        // on every publish so republishing an already-projected view cannot leave a
+        // mark behind after it was reset.
+        lock (brandIcons) foreach (string surface in new[] { "toolbar", "dock" }) foreach (string section in new[] { "left", "center", "right" }) foreach (var row in projected[surface]![section]!.AsArray())
+        {
+            row!.AsObject().Remove("brandIcon"); row.AsObject().Remove("brandIconHide");
+            row.AsObject().Remove("brandLabel"); row.AsObject().Remove("brandText"); row.AsObject().Remove("brandStyle");
+            row.AsObject().Remove("brandDevice");
+            if (!brandIcons.TryGetValue(row["id"]!.GetValue<string>(), out var brand)) continue;
+            if (brand.Icon is { Length: > 0 } slug) row["brandIcon"] = slug;
+            if (brand.IconHidden) row["brandIconHide"] = "1";
+            if (brand.Device == "desktop") row["brandDevice"] = "desktop";
+            row["brandLabel"] = brand.Label;
+            if (brand.Text.Length > 0) row["brandText"] = brand.Text;
+            if (brand.Style == "color") row["brandStyle"] = "color";
+        }
         string serialized=projected.ToJsonString();using var document = JsonDocument.Parse(serialized); var view = document.RootElement.Clone(); Volatile.Write(ref latestView, new(view));
         expectedBars = Array(view, "monitors").Sum(m => (Flag(m, "toolbar") ? 1 : 0) + (Flag(m, "dock") ? 1 : 0));
         if (expectedBars == 0) throw new InvalidDataException("Independent validation requires an enabled toolbar or Dock.");
@@ -122,7 +270,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
             if (topic == "bluetooth" && kind == "@magic/bluetooth-popup") { bluetoothDetails.Show(token); return; }
             if (topic == "wifi") { if (NetworkPopupAcceptsDetails(token)) networkDetails.Show(token); return; }
             if (kind == "@magic/media-popup") state = await MediaState(state, cancellation);
-            var panel = NativeSystemPanel.Build(kind, NetworkState(state),powerView,notificationQuiet,displayView); panel.Data["hostPid"] = Environment.ProcessId; lock (currentGate) { if (currentToken == token) currentPanel = panel; else return; }
+            var panel = NativeSystemPanel.Build(kind, NetworkState(state),powerView,notificationQuiet,displayView,kind=="@magic/user-menu"?CommunityPreferences.Load(deployment.Root):null); panel.Data["hostPid"] = Environment.ProcessId; lock (currentGate) { if (currentToken == token) currentPanel = panel; else return; }
             await popups.Update(JsonSerializer.SerializeToElement(new { token, data = panel.Data }), cancellation);
         }
     }
@@ -225,6 +373,10 @@ internal sealed partial class NativeSystemUiSession : IDisposable
     {
         string id = Text(command, "id"), verb = Text(command, "verb", "activate");
         if(verb=="extension-action"){_ = ExtensionInvoke(command);return;}
+        // Tray icons are a list inside one module, so their order is not the module order
+        // and cannot ride the same verb. This has to precede the bar:toolbar catch-all
+        // below, which hands every other bar verb to ConfigureBar.
+        if (verb == "tray-order") { await SetTrayOrder(Array(command, "trayOrder").Select(x => x.GetString() ?? "").Where(x => x.Length > 0).ToArray(), stop.Token); return; }
         if (id == "__measure-popup") { await Open(Text(command, "widget"), command); return; }
         if ((id is "bar:toolbar" or "bar:dock") && verb == "windows-authorization") { taskbar?.RevealWindowsEntry(); return; }
         if ((id is "bar:toolbar" or "bar:dock") && verb == "show-desktop") { showDesktopCommand.Request(Notice); return; }
@@ -260,7 +412,9 @@ internal sealed partial class NativeSystemUiSession : IDisposable
             }
             else Launch(offered, false); return;
         }
-        if (verb is "remove" or "move-left" or "move-right" or "edit-custom-icon") { await ConfigureBar(Text(offered, "nativeSurface", "dock"), command); return; }
+        // Every bar-item edit verb has to be routed here first: unknown verbs fall through
+        // to the module switch below and would e.g. reopen the user menu.
+        if (verb is "remove" or "move-left" or "move-right" or "edit-custom-icon" or "reset-icon" or "set-brand-icon" or "set-brand-device" or "set-brand-style" or "set-brand-label" or "set-brand-icon-hide" or "set-menu-layout" or "set-focused-separator" or "set-toolbar-drag-button-only") { await ConfigureBar(Text(offered, "nativeSurface", "dock"), command); return; }
         string module = Text(offered, "nativeModule");
         string kind = module switch { "magic.user" => "@magic/user-menu", "magic.power-menu" or "magic.battery" => "@magic/power-menu", "magic.clock" => "@magic/calendar-popup", "magic.tray" => "@magic/system-tray", "magic.bluetooth" => "@magic/bluetooth-popup", "magic.network" => "@magic/network-popup", "magic.keyboard" => "@magic/keyboard-selector", "magic.quick-settings" => "@magic/quick-settings", "magic.audio" or "magic.player" => "@magic/media-popup", "magic.notifications" => "@magic/notifications", "magic.start" => "@magic/apps-menu", _ => "" };
         if (module == "magic.desktop") { showDesktopCommand.Request(Notice); return; }
@@ -340,7 +494,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
                 displayProviders["brightness"]=await backend.Request("brightness-read",new{refresh=true},stop.Token);
                 state=state with{Providers=displayProviders};
             }
-            double providerMs=timing.Elapsed.TotalMilliseconds;var panel = kind == "@magic/apps-menu" ? await AppsPanel(opening: true) : NativeSystemPanel.Build(kind, NetworkState(state),Flag(trigger,"nativePowerView"),notificationQuiet,Flag(trigger,"nativeDisplayView"));
+            double providerMs=timing.Elapsed.TotalMilliseconds;var panel = kind == "@magic/apps-menu" ? await AppsPanel(opening: true) : NativeSystemPanel.Build(kind, NetworkState(state),Flag(trigger,"nativePowerView"),notificationQuiet,Flag(trigger,"nativeDisplayView"),kind=="@magic/user-menu"?CommunityPreferences.Load(deployment.Root):null);
             // The shared popup gate never waits for Wi-Fi enumeration. Show
             // current state now and refresh only the still-visible network token.
             if (kind == "@magic/network-popup") panel = NativeSystemPanel.Build(kind, NetworkPanelState(), notificationQuiet: notificationQuiet);
@@ -354,7 +508,10 @@ internal sealed partial class NativeSystemUiSession : IDisposable
             // Bar input grants this adapter foreground rights. Return them to
             // our owned renderer before it activates the requested popup.
             bool delegated=AllowSetForegroundWindow((uint)renderer);double panelMs=timing.Elapsed.TotalMilliseconds;
-            var opened = JsonSerializer.SerializeToElement(await popups.Open(JsonSerializer.SerializeToElement(new { widgetId = kind, payload = new { desiredPosition = new { x, y }, alignX = "Center", alignY = y > SystemParameters.PrimaryScreenHeight / 2 ? "End" : "Start" }, data = panel.Data }), stop.Token));
+            // The tuning panel's unsaved copy rides with the card's first packet too,
+            // so a card opened while the panel stands is shaped from the draft.
+            object? cardLook = kind == "@magic/user-menu" ? PreferencesView(Preferences()) : null;
+            var opened = JsonSerializer.SerializeToElement(await popups.Open(JsonSerializer.SerializeToElement(new { widgetId = kind, payload = new { desiredPosition = new { x, y }, alignX = "Center", alignY = y > SystemParameters.PrimaryScreenHeight / 2 ? "End" : "Start" }, data = panel.Data, preferences = cardLook }), stop.Token));
             log(kind=="@magic/apps-menu"?"independent_apps_open_timing":"independent_popup_open_timing",new{kind,triggerSource=trigger.ValueKind==JsonValueKind.Undefined?"keyboard":"shell",delegated,queueMs=queuedMs,providerMs=providerMs-queuedMs,panelMs=panelMs-providerMs,rendererAckMs=timing.Elapsed.TotalMilliseconds-panelMs,totalAckMs=timing.Elapsed.TotalMilliseconds,accepted=Flag(opened,"accepted"),scope="Owned renderer receipt; not first DWM frame"});
             if (!Flag(opened, "accepted")){if(media)await SetMediaPopupSubscription(false);return;} string token = Text(opened, "token");shown=true;
             lock (currentGate) { currentToken = token; currentKind = kind; currentPanel = panel; }
@@ -448,8 +605,9 @@ internal sealed partial class NativeSystemUiSession : IDisposable
     {
         if (Interlocked.Exchange(ref closing, 1) != 0) return;
         lyrics.Dispose();
+        if (host is { } borrowed) { borrowed.ReadBarModules = null; borrowed.SetBarModule = null; borrowed.RefreshPreferences = null; borrowed.RefreshCard = null; borrowed.CardWindow = null; borrowed.HoldCard = null; borrowed.CloseCard = null; borrowed.CardDraft = null; host = null; }
         try { string path = Path.Combine(deployment.Root, "runtime/system/native-ready.json"); if (File.Exists(path) && new FileInfo(path).Length < 8192) { var ready = JsonNode.Parse(File.ReadAllText(path))!.AsObject(); if (ready["nonce"]?.GetValue<string>() == deployment.Nonce && ready["adapterPid"]?.GetValue<int>() == Environment.ProcessId) { ready["active"] = false; ready["stoppedUtc"] = DateTimeOffset.UtcNow.ToString("o"); StateStore.AtomicWrite(path, ready.ToJsonString(), null); } } } catch (Exception error) { log("independent_native_readiness_close", new { type = error.GetType().Name }); }
-        lock(jumpGate)jumpLists.Clear();MediaCardChanged=null;networkPortal.Dispose();networkDetails.Dispose();bluetoothDetails.Dispose();stop.Cancel(); elevatedWindows.Dispose(); taskbar?.RequestStop(); shell.BarReady -= BarReady; shell.InlineImage = null; popups.InlineImage = null;shell.ExtensionState=null; Volatile.Write(ref images, new Dictionary<string, string>());
+        lock(jumpGate)jumpLists.Clear();MediaCardChanged=null;networkPortal.Dispose();networkDetails.Dispose();bluetoothDetails.Dispose();stop.Cancel(); elevatedWindows.Dispose(); taskbar?.RequestStop(); shell.BarReady -= BarReady; shell.InlineImage = null; popups.InlineImage = null; popups.TuningVisible = null; Volatile.Write(ref tuning, null);shell.ExtensionState=null; Volatile.Write(ref images, new Dictionary<string, string>());
         Released = Task.Run(async () => {
             try { if (taskbar is not null) await taskbar.DisposeAsync(); }
             finally {

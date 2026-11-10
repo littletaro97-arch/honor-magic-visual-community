@@ -144,7 +144,7 @@ inline void NativePopup::PaintFunctionalPanel(ID2D1DeviceContext *c)
 {
     if(CenterPanel()){PaintCenterPanel(c);return;}
     NativePaint p(c,app.graphics,dark);auto &t=p.theme;
-    if(!resizePainting){if(!NativeLowPower(app.model))p.Shadow({10,10,width-10,height-10},NativeMetrics::FloatingRadius);
+    if(!resizePainting){if(!NativeLowPower(app.model))p.Shadow({10,10,width-10,height-10},NativeMetrics::FloatingRadius,NativeMetrics::PopupInset);
     p.Material({10,10,width-10,height-10},MaterialTier(),Glass(),NativeMetrics::FloatingRadius);}
     bool power=PowerView(),bt=kind==L"@magic/bluetooth-popup",wifi=kind==L"@magic/network-popup",media=kind==L"@magic/media-popup";
     p.Text(power?Ui(L"电量与性能",L"Battery & performance"):media?Ui(L"声音",L"Sound"):caption,{22,20,width-(power?84:72),48},15,t.Ink(),600);

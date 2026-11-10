@@ -186,4 +186,23 @@ internal sealed partial class NativeSystemUiSession
         }
         await backend.Request("tray-refresh", new { }, stop.Token);
     }
+    // The bar drags a tray icon on its own, so the order arrives as the whole list rather
+    // than as a drop onto a neighbour. Icons the caller did not mention keep the relative
+    // order they had, which is what the tray panel's own drag expects to find when the
+    // user goes back to it.
+    internal async Task SetTrayOrder(string[] ordered, CancellationToken token)
+    {
+        if (ordered.Length is 0 or > 256 || ordered.Distinct(StringComparer.Ordinal).Count() != ordered.Length) throw new InvalidDataException("托盘顺序无效。");
+        lock (trayPromoted)
+        {
+            var known = Array(presentation.State.Providers.GetValueOrDefault("tray"), "icons").Select(icon => Text(icon, "stableId")).Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal);
+            if (!ordered.All(known.Contains)) throw new InvalidDataException("托盘图标已变化，请重试。");
+            var next = ordered.ToList();
+            foreach (string id in trayOrder) if (!next.Contains(id) && known.Contains(id)) next.Add(id);
+            trayOrder.Clear(); trayOrder.AddRange(next);
+            if (trayOrder.Count > 256) throw new InvalidOperationException("托盘偏好已达到上限。");
+            StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "tray-preferences.json"), JsonSerializer.Serialize(new { promoted = trayPromoted, order = trayOrder }), null);
+        }
+        await backend.Request("tray-refresh", new { }, token);
+    }
 }

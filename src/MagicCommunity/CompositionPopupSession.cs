@@ -81,6 +81,16 @@ internal sealed class CompositionPopupSession : IDisposable
     }
     private Receipt? current;
     private long window;
+    // What the standing popup must not dismiss for: the card's tuning panel, named
+    // before it takes focus. Zero means no hold.
+    private long held;
+    // The panel's process outlives any one handle. WPF can recreate the panel's HWND
+    // between EnsureHandle and Show, so the card is told to hold the process as well.
+    private int heldPid;
+    // Non-null while the card's tuning panel is on screen. A card opened during that
+    // time carries the hold in its very first packet, before the panel can take focus.
+    internal Func<bool>? TuningVisible;
+    internal long Window => window;
     private bool disposed;
     internal CompositionPopupSession(string root, IEnumerable<string> selected, Dispatcher ui, Func<object, Task> send,
                                      Func<bool> healthy)
@@ -150,9 +160,22 @@ internal sealed class CompositionPopupSession : IDisposable
                                  : new {};
             await ui.InvokeAsync(()=>{RegisterImages(data);if(kind=="@magic/apps-menu")data=WarmApplications(data);});
             if(Encoding.UTF8.GetByteCount(data.GetRawText())>196608)throw new InvalidDataException("原生弹窗数据超过上限。");
-            await send(new { type = "popup", token = receipt.Token, kind, payload, data, account });
+            // The tuning panel outlives a card receipt. A card opened while the panel
+            // stands is told to hold the panel's process in its first packet; a stale
+            // handle alone is not enough because WPF may have replaced it. The panel's
+            // unsaved preferences ride along so the fresh card is shaped from them.
+            bool tuning = kind == "@magic/user-menu" && TuningVisible?.Invoke() == true;
+            var packet = new Dictionary<string, object?> { ["type"] = "popup", ["token"] = receipt.Token, ["kind"] = kind, ["payload"] = payload, ["data"] = data, ["account"] = account, ["holdWindow"] = tuning ? held : 0, ["holdPid"] = tuning ? Environment.ProcessId : 0 };
+            bool hasPreferences = body.TryGetProperty("preferences", out var offered) && offered.ValueKind == JsonValueKind.Object;
+            if (hasPreferences) packet["preferences"] = offered.Clone();
+            await send(packet);
             if (!await receipt.Ready.Task.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation))
                 throw new InvalidOperationException(kind=="@magic/apps-menu"?"原生开始菜单未完成显示；未创建旧版兼容菜单。":"弹窗未完成显示，转交兼容入口。");
+            // The card is now shown; repeat the hold on the update lane so the panel
+            // can take focus again even if the opening packet raced it. The hold names
+            // the panel's process, not only the handle WPF may have replaced.
+            if (kind == "@magic/user-menu" && (held != 0 || tuning))
+                await send(new { type = "popup-update", token = receipt.Token, holdWindow = held, holdPid = Environment.ProcessId });
             return new { accepted = true, token = receipt.Token, window };
         }
         catch (Exception error) when (error is not OutOfMemoryException)
@@ -209,15 +232,41 @@ internal sealed class CompositionPopupSession : IDisposable
     internal async Task<object> Update(JsonElement body, CancellationToken cancellation)
     {
         string token = body.GetProperty("token").GetString() ?? "";
-        bool active = await ui.InvokeAsync(() => current?.Token == token && !disposed && healthy());
+        var (active, card) = await ui.InvokeAsync(() => (current?.Token == token && !disposed && healthy(), current?.Token == token && current.Kind == "@magic/user-menu"));
         if (!active) return new { accepted = false };
         if(body.TryGetProperty("close",out var close)&&close.ValueKind==JsonValueKind.True){await ui.InvokeAsync(()=>FinishCurrent("cancel"));await send(new{type="popup-hide",token});return new{accepted=true};}
         var data = body.GetProperty("data").Clone();
         if (Encoding.UTF8.GetByteCount(data.GetRawText()) > 196608) throw new InvalidDataException("原生弹窗数据超过上限。");
         await ui.InvokeAsync(()=>{RegisterImages(data);if(current?.Kind=="@magic/apps-menu")data=WarmApplications(data);});
         if(Encoding.UTF8.GetByteCount(data.GetRawText())>196608)throw new InvalidDataException("原生弹窗数据超过上限。");
-        await send(new { type = "popup-update", token, data });
+        // A standing card restates the panel's process hold on every refresh, so a
+        // repaint can never be the moment the panel's focus dismisses the card.
+        int hold = body.TryGetProperty("holdPid", out var offeredHold) && offeredHold.ValueKind == JsonValueKind.Number ? offeredHold.GetInt32() : 0;
+        if (hold == 0 && card && TuningVisible?.Invoke() == true) hold = Environment.ProcessId;
+        // Whitelist the fields the caller offered. Rebuilding this packet from a fresh
+        // anonymous object silently dropped preferences and holdWindow, so a tuning
+        // change that arrived on this lane never reached the renderer.
+        bool hasPreferences = body.TryGetProperty("preferences", out var offeredPreferences) && offeredPreferences.ValueKind == JsonValueKind.Object;
+        var packet = new Dictionary<string, object?> { ["type"] = "popup-update", ["token"] = token, ["data"] = data };
+        if (hasPreferences) packet["preferences"] = offeredPreferences.Clone();
+        if (body.TryGetProperty("holdWindow", out var offeredWindow) && offeredWindow.ValueKind == JsonValueKind.Number) packet["holdWindow"] = offeredWindow.GetInt64();
+        if (hold != 0) packet["holdPid"] = hold;
+        await send(packet);
         return new { accepted = true };
+    }
+    // The card's tuning panel stands beside the card, so the card must not read the
+    // panel taking focus as the reader leaving. A hold names that one window; zero
+    // releases it. Sent on the same popup-update lane, with no data to repaint.
+    internal async Task<bool> Hold(long window, CancellationToken cancellation)
+    {
+        // Remember before the token check: a card that is still opening has to inherit
+        // the hold from its first packet, not depend on this update surviving.
+        held = window;
+        heldPid = window != 0 ? Environment.ProcessId : 0;
+        string? token = await ui.InvokeAsync(() => disposed || current is null || current.Kind != "@magic/user-menu" ? null : current.Token);
+        if (token is null) return false;
+        await send(new { type = "popup-update", token, holdWindow = window, holdPid = heldPid });
+        return true;
     }
     internal async Task Close(CancellationToken cancellation){
         string? token=await ui.InvokeAsync(()=>{string? token=current?.Token;FinishCurrent("cancel");return token;});
@@ -270,6 +319,10 @@ internal sealed class CompositionPopupSession : IDisposable
             return;
         current.Ready.TrySetResult(false);
         current.Done.TrySetResult(JsonSerializer.SerializeToElement(new { action }));
+        // A hold names one popup's helper window; the next popup starts unheld so a
+        // recycled handle can never keep a fresh card from dismissing. A panel that
+        // still stands re-arms the process hold through the next card's first packet.
+        held = 0;heldPid = 0;
         current = null;images.Clear();
     }
     public void Dispose()

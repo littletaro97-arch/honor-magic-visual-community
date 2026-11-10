@@ -96,7 +96,7 @@ inline void NativePopup::LayoutCenterPanel()
 inline void NativePopup::PaintCenterPanel(ID2D1DeviceContext *c)
 {
     NativePaint p(c,app.graphics,dark);auto &t=p.theme;bool quick=kind==L"@magic/quick-settings";
-    D2D1_RECT_F outer{10,10,width-10,height-10};if(!resizePainting){if(!NativeLowPower(app.model))p.Shadow(outer);p.Material(outer,MaterialTier(),Glass());}
+    D2D1_RECT_F outer{10,10,width-10,height-10};if(!resizePainting){if(!NativeLowPower(app.model))p.Shadow(outer,NativeMetrics::FloatingRadius,NativeMetrics::PopupInset);p.Material(outer,MaterialTier(),Glass());}
     float titleRight=width-24;
     if(!quick)for(auto const &r:rows)if(!r.offscreen&&r.rect.top<32&&(r.id==L"focus"||r.id==L"clear"))titleRight=std::min(titleRight,r.rect.left-8);
     p.Text(quick?(quickDevices?Ui(L"声音输出",L"Sound output"):Ui(L"控制中心",L"Control Center")):Ui(L"通知中心",L"Notifications"),

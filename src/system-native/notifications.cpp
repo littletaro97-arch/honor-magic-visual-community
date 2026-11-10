@@ -3,6 +3,7 @@
 #include <appmodel.h>
 #include <fstream>
 #include <filesystem>
+#include <set>
 #include <winrt/Windows.UI.Notifications.h>
 #include <winrt/Windows.UI.Notifications.Management.h>
 #include <winrt/Windows.ApplicationModel.h>
@@ -252,15 +253,27 @@ JsonObject NotificationProvider::Read()
             if (app)
                 Text(row, L"appName", std::wstring(app.DisplayInfo().DisplayName()).substr(0, 512));
             JsonArray text;
-            auto binding = notification.Notification().Visual().GetBinding(KnownNotificationBindings::ToastGeneric());
-            if (binding)
+            // A toast carries one or more bindings, and ToastGeneric is only one of
+            // them: an app that still ships a legacy template puts its words in a
+            // binding this lookup never returns, so the row arrived with no text at
+            // all and the centre had nothing to draw. Read every binding instead.
+            auto visual = notification.Notification().Visual();
+            std::set<std::wstring> seen;
+            auto appendText = [&](winrt::Windows::UI::Notifications::NotificationBinding const &binding) {
                 for (auto const &element : binding.GetTextElements())
                 {
                     if (text.Size() >= 12)
-                        break;
-                    text.Append(
-                        JsonValue::CreateStringValue(winrt::hstring(std::wstring(element.Text()).substr(0, 1024))));
+                        return;
+                    auto value = std::wstring(element.Text());
+                    if (value.empty() || !seen.insert(value).second)
+                        continue;
+                    text.Append(JsonValue::CreateStringValue(winrt::hstring(value.substr(0, 1024))));
                 }
+            };
+            if (auto generic = visual.GetBinding(KnownNotificationBindings::ToastGeneric()))
+                appendText(generic);
+            for (auto const &binding : visual.Bindings())
+                appendText(binding);
             row.Insert(L"text", text);
             budget += winrt::to_string(row.Stringify()).size();
             if (budget > 750000)

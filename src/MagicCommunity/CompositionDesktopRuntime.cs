@@ -595,7 +595,7 @@ public sealed partial class CompositionDesktopRuntime : IDisposable
     {
         if(disposed)return;disposed=true;entrance?.Complete(false);gridEditor.Clear();independentSystem?.Dispose();popups?.Dispose();shell?.Dispose();if(bridge is not null){bridge.NativePopups=null;bridge.NativeShell=null;bridge.NativeProbe=null;}bridge?.Dispose();controller.Changed-=QueueSnapshot;
         if(bridge is not null){bridge.NativeIconsReady-=IconsReady;bridge.NativeIconInvalidated-=IconInvalidated;bridge.NativeImageInvalidated-=ImageInvalidated;bridge.NativeWorkspaceChanged-=QueueSnapshot;}
-        controller.ApplyKeyboardPreferences=null;handoff.Dispose();honorServices.Dispose();todos.Dispose();encodeck.Dispose();weather.Dispose();clipboardImage.Dispose();data.Dispose();previewIcons?.Dispose();stop.Cancel();pipe.Dispose();client?.Dispose();identity?.Dispose();child?.Dispose();
+        controller.ApplyKeyboardPreferences=null;controller.RefreshPreferences=null;handoff.Dispose();honorServices.Dispose();todos.Dispose();encodeck.Dispose();weather.Dispose();clipboardImage.Dispose();data.Dispose();previewIcons?.Dispose();stop.Cancel();pipe.Dispose();client?.Dispose();identity?.Dispose();child?.Dispose();
     }
     [DllImport("kernel32.dll",SetLastError=true)]private static extern bool GetNamedPipeClientProcessId(IntPtr pipe,out uint pid);
 }

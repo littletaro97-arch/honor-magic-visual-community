@@ -92,7 +92,7 @@ inline std::wstring HonorModuleGlyph(JsonObject const &item){
         return L"Honor:WiFi"+std::to_wstring(level);
     }
     if(module==L"magic.quick-settings")return L"Honor:controlCenter";
-    if(module==L"magic.user")return L"Honor:Account";
+    if(module==L"magic.user")return L"Honor:HONOR";
     if(module==L"magic.notifications"||plugin==L"@magic/dock-notifications")return Bool(item,L"hasNotifications")?L"Honor:havenotify":L"Honor:nonotify";
     if(module==L"magic.keyboard"||plugin==L"@magic/dock-keyboard-selector")return L"Honor:keyboard";
     if(module==L"magic.clock"||plugin==L"@magic/dock-calendar-popup")return L"Honor:clock1";

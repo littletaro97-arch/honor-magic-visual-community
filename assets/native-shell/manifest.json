@@ -970,6 +970,11 @@
       "name": "MagicDock_music_thumbnail",
       "path": "icons/MagicDock_music_thumbnail.svg",
       "sha256": "f0edf81e5198e2d253e65b50f012ec49e1b22217cb40370e4e546d056e523fc1"
+    },
+    {
+      "name": "MagicSeparatorBar",
+      "path": "icons/MagicSeparatorBar.svg",
+      "sha256": "bfae92174175d83a2e356ee60f91f09fe379432ff4961c55d0c0fa08ff3b1ef7"
     }
   ],
   "source": "Copied from the locked reference, without filesystem links"
