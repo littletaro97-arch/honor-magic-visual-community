@@ -5,9 +5,16 @@
 inline void NativePopup::BuildContextRows() {
   rows.clear();
   auto values = Data().GetNamedArray(L"rows");
-  contextTotal=0;contextScroll=0;
   bool toolbar=Str(Data(),L"menuStyle")==L"toolbar";
-  float top=toolbar?8.f:10.f,y=top,x=0,columnWidth=contextColumnWidth>0?contextColumnWidth:width;
+  bool scrolls=ContextScrolls();
+  // Reset before summing: the window re-measures on every scroll step, and a total that
+  // kept growing turned the scroll range into an endless one.
+  contextTotal=0;for(auto const &v:values)contextTotal+=ContextRowHeight(v.GetObject());
+  // The scrolling layout keeps the whole list in one window and moves it under a fixed
+  // viewport; the column layout starts every column at the same top edge instead.
+  if(scrolls)contextScroll=std::clamp(contextScroll,0.f,std::max(0.f,contextTotal-ContextViewport()));
+  else contextScroll=0;
+  float top=toolbar?8.f:10.f,y=scrolls?top-contextScroll:top,x=0,columnWidth=scrolls?width:(contextColumnWidth>0?contextColumnWidth:width);
   for (UINT i = 0; i < values.Size() && i < 256; i++) {
     auto v = values.GetAt(i).GetObject();
     PopupRow row;
@@ -19,7 +26,7 @@ inline void NativePopup::BuildContextRows() {
     row.active = Bool(v, L"checked");row.dimmed=Bool(v,L"dimmed");
     row.action = L"context";
     float h = ContextRowHeight(v);
-    if(contextColumns>1&&y>top&&y-top+h>ContextViewport()+.1f){contextTotal=std::max(contextTotal,y-top);y=top;x+=columnWidth;}
+    if(!scrolls&&contextColumns>1&&y>top&&y-top+h>ContextViewport()+.1f){contextTotal=std::max(contextTotal,y-top);y=top;x+=columnWidth;}
     row.rect = {x+8, y, x+columnWidth - 8, y + h-(row.control!=L"separator"?(toolbar?8.f:2.f):0.f)};
     row.offscreen=row.rect.bottom<=10||row.rect.top>=height-10;
     y += h;
@@ -35,7 +42,13 @@ inline void NativePopup::PaintContext(ID2D1DeviceContext *c) {
   NativePaint p(c, app.graphics, dark);
   auto &t = p.theme;
   bool toolbar=Str(Data(),L"menuStyle")==L"toolbar";
-  if(!NativeLowPower(app.model))p.Shadow(MaterialBounds(),toolbar?10:NativeMetrics::FloatingRadius);
+  if(!NativeLowPower(app.model)){
+    // A cascade menu has only a few DIPs of margin around its material, so the
+    // halo has to live inside that margin or the window region clips it away.
+    auto bounds=MaterialBounds();
+    float room=std::min({bounds.left,bounds.top,width-bounds.right,height-bounds.bottom});
+    p.Shadow(bounds,toolbar?10:MaterialRadius(),room);
+  }
   p.Material(MaterialBounds(),NativeMaterial::Menu,Glass(),toolbar?10:NativeMetrics::FloatingRadius);
   c->PushAxisAlignedClip({6, 6, width - 6, height - 6},
                          D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -49,12 +62,24 @@ inline void NativePopup::PaintContext(ID2D1DeviceContext *c) {
              (rect.top + rect.bottom) / 2, t.Gray(900,.10f));
       continue;
     }
+    if (row.control == L"group") {
+      // A drawn rail rather than a caption: the vendor list runs past a screen, and
+      // the eye needs a hard anchor to jump to the letter it wants.
+      auto band = rect;band.top += 4;band.bottom -= 4;
+      p.Fill(band, dark ? D2D1::ColorF(0.22f,0.23f,0.26f,1.f)
+                        : D2D1::ColorF(0.11f,0.12f,0.15f,1.f), 6.f);
+      p.Text(row.label, {band.left + 12, band.top, band.right - 12, band.bottom}, 11.f,
+             D2D1::ColorF(1.f,1.f,1.f,.94f), 700);
+      continue;
+    }
     p.Interaction(InteractionRegion(i),false,materialPreview&&i==hover,i==focus);
     auto ink = row.control==L"danger"?t.Danger():row.enabled&&!row.dimmed?t.Ink():t.MaterialMuted();
     if (!(contextIcon&&contextIcon(c,row.id,{rect.left+8,rect.top+8,rect.left+24,rect.top+24}))&&!appearanceIcons.Draw(
             c, row.id,
             {rect.left + 8, rect.top + 8, rect.left + 24, rect.top + 24})) {
-      if (row.active)
+      // A toolbar menu marks its selection at the trailing edge (see below), so the
+      // leading slot stays empty there: two ticks on one row read as two states.
+      if (row.active && !toolbar)
         p.Icon(L"check",
                {rect.left + 8, rect.top + 8, rect.left + 24, rect.top + 24},
                ink);

@@ -4,7 +4,7 @@
 struct NativeTransition
 {
     Graphics graphics;
-    struct Screen{HWND hwnd=nullptr;RECT rect{};Windows::UI::Composition::Desktop::DesktopWindowTarget target{nullptr};ContainerVisual root{nullptr};SpriteVisual cover{nullptr},label{nullptr},logo{nullptr};CompositionDrawingSurface text{nullptr},logoSurface{nullptr};};
+    struct Screen{HWND hwnd=nullptr;RECT rect{};Windows::UI::Composition::Desktop::DesktopWindowTarget target{nullptr};ContainerVisual root{nullptr};SpriteVisual cover{nullptr},label{nullptr},logo{nullptr};CompositionDrawingSurface text{nullptr},logoSurface{nullptr};UINT32 logoPixelWidth=0,logoPixelHeight=0;};
     struct Frame{uint64_t offset;uint32_t bytes;};
     std::vector<Frame> frames;std::ifstream sequence;int currentFrame=-1;uint32_t frameWidth=0,frameHeight=0,fps=30;
     std::vector<std::unique_ptr<Screen>> screens;
@@ -31,8 +31,8 @@ struct NativeTransition
         auto length=std::filesystem::file_size(file);if(length<24||length>256ull*1024*1024)throw std::runtime_error("Alpha sequence size");
         sequence.open(file,std::ios::binary);char magic[8]{};sequence.read(magic,8);if(memcmp(magic,"MAGICAF1",8))throw std::runtime_error("Alpha sequence format");
         uint32_t count=0;sequence.read(reinterpret_cast<char*>(&count),4);sequence.read(reinterpret_cast<char*>(&frameWidth),4);sequence.read(reinterpret_cast<char*>(&frameHeight),4);sequence.read(reinterpret_cast<char*>(&fps),4);
-        if(count<1||count>256||frameWidth<1||frameWidth>2048||frameHeight<1||frameHeight>2048||fps<1||fps>60||static_cast<uint64_t>(frameWidth)*frameHeight*4>4*1024*1024)throw std::runtime_error("Alpha frame bounds");
-        uint64_t minimum=24ull+count*12;for(uint32_t i=0;i<count;i++){Frame frame{};sequence.read(reinterpret_cast<char*>(&frame.offset),8);sequence.read(reinterpret_cast<char*>(&frame.bytes),4);if(!sequence||frame.offset<minimum||frame.bytes<8||frame.bytes>4*1024*1024||frame.offset>length||frame.bytes>length-frame.offset)throw std::runtime_error("Alpha frame table");frames.push_back(frame);minimum=frame.offset+frame.bytes;}
+        if(count<1||count>256||frameWidth<1||frameWidth>4096||frameHeight<1||frameHeight>4096||fps<1||fps>60||static_cast<uint64_t>(frameWidth)*frameHeight*4>16*1024*1024)throw std::runtime_error("Alpha frame bounds");
+        uint64_t minimum=24ull+count*12;for(uint32_t i=0;i<count;i++){Frame frame{};sequence.read(reinterpret_cast<char*>(&frame.offset),8);sequence.read(reinterpret_cast<char*>(&frame.bytes),4);if(!sequence||frame.offset<minimum||frame.bytes<8||frame.bytes>16*1024*1024||frame.offset>length||frame.bytes>length-frame.offset)throw std::runtime_error("Alpha frame table");frames.push_back(frame);minimum=frame.offset+frame.bytes;}
     }
     void ReadFrame(int index){
         if(index==currentFrame||frames.empty())return;auto frame=frames.at(index);std::vector<BYTE> png(frame.bytes);sequence.seekg(frame.offset);sequence.read(reinterpret_cast<char*>(png.data()),frame.bytes);if(!sequence)throw std::runtime_error("Alpha frame read");
@@ -41,7 +41,7 @@ struct NativeTransition
         com_ptr<IWICFormatConverter> converter;check_hresult(graphics.wic->CreateFormatConverter(converter.put()));check_hresult(converter->Initialize(image.get(),GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom));
         com_ptr<ID2D1DeviceContext> c;check_hresult(graphics.d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,c.put()));logoBitmap=nullptr;check_hresult(c->CreateBitmapFromWicBitmap(converter.get(),nullptr,logoBitmap.put()));currentFrame=index;
     }
-    void DrawFrame(){for(auto &s:screens){if(!s->logoSurface||!logoBitmap)continue;auto drawing=s->logoSurface.as<abiComposition::ICompositionDrawingSurfaceInterop>();com_ptr<ID2D1DeviceContext> c;POINT offset{};check_hresult(drawing->BeginDraw(nullptr,__uuidof(ID2D1DeviceContext),c.put_void(),&offset));c->SetTransform(D2D1::Matrix3x2F::Translation(static_cast<float>(offset.x),static_cast<float>(offset.y)));c->Clear(D2D1::ColorF(0,0));c->DrawBitmap(logoBitmap.get());check_hresult(drawing->EndDraw());}}
+    void DrawFrame(){for(auto &s:screens){if(!s->logoSurface||!logoBitmap)continue;auto drawing=s->logoSurface.as<abiComposition::ICompositionDrawingSurfaceInterop>();com_ptr<ID2D1DeviceContext> c;POINT offset{};check_hresult(drawing->BeginDraw(nullptr,__uuidof(ID2D1DeviceContext),c.put_void(),&offset));c->SetUnitMode(D2D1_UNIT_MODE_PIXELS);c->Clear(D2D1::ColorF(0,0));/* Scale through the transform and let DrawImage resample once, cubic: the frame is smaller than the panel, and the plain bitmap path only offers nearest or linear. */float sx=static_cast<float>(s->logoPixelWidth)/frameWidth,sy=static_cast<float>(s->logoPixelHeight)/frameHeight;c->SetTransform(D2D1::Matrix3x2F::Scale(sx,sy)*D2D1::Matrix3x2F::Translation(static_cast<float>(offset.x),static_cast<float>(offset.y)));c->DrawImage(logoBitmap.get(),nullptr,nullptr,D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,D2D1_COMPOSITE_MODE_SOURCE_OVER);check_hresult(drawing->EndDraw());}}
     void Tick(){
         auto elapsed=GetTickCount64()-began;if(revealing){if(GetTickCount64()>=revealAt)PostQuitMessage(0);return;}
         if((GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0){Reveal(250);return;}
@@ -70,8 +70,12 @@ struct NativeTransition
         check_hresult(graphics.compositor.as<abiComposition::Desktop::ICompositorDesktopInterop>()->CreateDesktopWindowTarget(s->hwnd,FALSE,reinterpret_cast<abiComposition::Desktop::IDesktopWindowTarget**>(put_abi(s->target))));s->root=graphics.compositor.CreateContainerVisual();s->root.Size({width,height});s->target.Root(s->root);
         s->cover=graphics.compositor.CreateSpriteVisual();s->cover.Size({width,height});s->cover.Brush(graphics.compositor.CreateColorBrush(Windows::UI::Color{255,0,0,0}));s->cover.Opacity(0);s->root.Children().InsertAtBottom(s->cover);
         if(entrance&&!frames.empty()){
-            s->logoSurface=graphics.composition.CreateDrawingSurface({static_cast<float>(frameWidth),static_cast<float>(frameHeight)},Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,Windows::Graphics::DirectX::DirectXAlphaMode::Premultiplied);
-            float fit=std::min(width/frameWidth,height/frameHeight);s->logo=graphics.compositor.CreateSpriteVisual();s->logo.Size({frameWidth*fit,frameHeight*fit});s->logo.Offset({(width-frameWidth*fit)/2,(height-frameHeight*fit)/2,0});s->logo.Brush(graphics.compositor.CreateSurfaceBrush(s->logoSurface));s->root.Children().InsertAtTop(s->logo);
+            // The sequence is smaller than the panel. Draw it into the panel's own
+            // pixels once, through the cubic path: handing a small surface to the
+            // compositor and letting it stretch is what made the reveal read as soft.
+            float logoScale=std::min(3.f,GetDpiForWindow(s->hwnd)/96.f),fit=std::min(width/frameWidth,height/frameHeight);
+            s->logoPixelWidth=static_cast<UINT32>(frameWidth*fit*logoScale+.5f);s->logoPixelHeight=static_cast<UINT32>(frameHeight*fit*logoScale+.5f);
+            s->logoSurface=graphics.composition.CreateDrawingSurface({static_cast<float>(s->logoPixelWidth),static_cast<float>(s->logoPixelHeight)},Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,Windows::Graphics::DirectX::DirectXAlphaMode::Premultiplied);s->logo=graphics.compositor.CreateSpriteVisual();s->logo.Size({frameWidth*fit,frameHeight*fit});s->logo.Offset({(width-frameWidth*fit)/2,(height-frameHeight*fit)/2,0});s->logo.Brush(graphics.compositor.CreateSurfaceBrush(s->logoSurface));s->root.Children().InsertAtTop(s->logo);
         }
         float uiScale=std::min(3.f,GetDpiForWindow(s->hwnd)/96.f);s->text=graphics.composition.CreateDrawingSurface({640*uiScale,110*uiScale},Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,Windows::Graphics::DirectX::DirectXAlphaMode::Premultiplied);
         com_ptr<ID2D1DeviceContext> c;POINT offset{};auto drawing=s->text.as<abiComposition::ICompositionDrawingSurfaceInterop>();check_hresult(drawing->BeginDraw(nullptr,__uuidof(ID2D1DeviceContext),c.put_void(),&offset));c->SetDpi(96*uiScale,96*uiScale);c->SetTransform(D2D1::Matrix3x2F::Translation(offset.x/uiScale,offset.y/uiScale));c->Clear(D2D1::ColorF(0,0));NativePaint p(c.get(),graphics,true);p.Text(entrance?L"正在准备 Magic 视界":L"正在恢复 Windows 桌面",{0,0,640,45},20,D2D1::ColorF(0xffffff),500,DWRITE_TEXT_ALIGNMENT_CENTER);p.Text(L"跳过动画 · Esc",{0,56,640,100},13,D2D1::ColorF(0xffffff,.7f),400,DWRITE_TEXT_ALIGNMENT_CENTER);check_hresult(drawing->EndDraw());

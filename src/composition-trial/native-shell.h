@@ -63,6 +63,9 @@ struct NativeBar : NativePopup
         if(value){KillTimer(hwnd,91);HideBarTooltip();barInteraction.Release(toolbarRoot);}
         else{if(!interrupted&&toolbarRoot){toolbarRoot.StopAnimation(L"Opacity");toolbarRoot.Opacity(0);}visible=true;PositionBar(SWP_NOACTIVATE|SWP_SHOWWINDOW);Layout();Draw();ScheduleClock();}
         bool animate=toolbarRoot&&NativeFeedbackMotion(app.model)&&(!value||visible&&!edge);
+        // A bar that dissolves while a window is dragged is a taste, not a given.
+        // Switched off, it simply steps out of the way with no motion at all.
+        if(animate&&!Bool(app.model.preferences,L"toolbarDissolve",true))animate=false;
         if(animate){
             bool grain=false;
             if(NativeMotion(app.model)){if(dockDissolve.Active()){dockDissolve.Play(app.graphics.compositor,!value,true);grain=true;}else grain=dockDissolve.Start(app.graphics,barHost,toolbarRoot,width,height,dpi/96,!value);}
@@ -88,7 +91,14 @@ struct NativeBar : NativePopup
     NativeToolbarSvg toolbarSvg;
     std::map<std::wstring,float> textWidths;
     std::wstring toolbarBackgroundKey,dropId;std::set<std::wstring> dropRows;
+    // Last backdrop decision written to the log; the tuple only changes on a switch.
+    std::wstring backdropTraceKey;
     std::vector<std::wstring> dragOrder,dragOriginalOrder;
+    // The tray is one module made of a button and a list of icons. Pressing the button
+    // moves the block; pressing an icon reorders that list, so the gesture needs its own
+    // order, its own target slots and its own commit.
+    bool dragTray=false;std::wstring dragTrayOwner,dragTraySection;
+    std::vector<std::wstring> dragTrayOrder,dragTrayOriginal;
     // Composition and SetWindowRgn can dispatch input while the row and visual
     // tables are being rebuilt. Keep gesture messages in order across that frame.
     struct PointerContact {POINTER_INPUT_TYPE type;POINT screen;};
@@ -113,16 +123,41 @@ struct NativeBar : NativePopup
     std::vector<JsonObject> dragEntries;
     std::vector<D2D1_RECT_F> dragRects;
     std::vector<std::pair<std::wstring,float>> dragTargets;
-    float dragTargetScroll=0;std::wstring dragTarget;
+    // T36: one coordinate basis per gesture. dragTargetScroll is fixed at pointer-down;
+    // dragRowScroll remembers the scroll the current rows were laid out with, so a
+    // refresh can map slot centres back into the fixed basis instead of resetting it.
+    float dragTargetScroll=0,dragRowScroll=0;std::wstring dragTarget;
+    // T36: the dragged row's own rect in the fixed drag frame. A wide row keeps the
+    // pointer outside its slot centre, so containment, not centre distance, decides
+    // whether the pointer is still on the row.
+    D2D1_RECT_F dragSelfRect{};bool dragSelfRectValid=false;
+    // T36: last swap position; a refresh cannot swap again without real pointer travel.
+    float lastSwapCursor=FLT_MAX;
     ULONGLONG dropUntil=0;
+    // T39: the whole-block tray drag folds its icons into the button the pointer
+    // holds. trayCollapseActive marks that gesture; trayCollapsedGhosts are the
+    // ghost visuals still owed their unfold after the drop.
+    bool trayCollapseActive=false;std::set<std::wstring> trayCollapsedGhosts;
     std::map<std::wstring,float> extensionWidths;bool extensionWidthsReady=false;
     std::map<std::wstring,std::wstring> extensionPreparedSessions,extensionReports;
     std::wstring extensionPressId,extensionPressSession,extensionPressRevision,extensionPressAction;
     float ExtensionTextWidth(std::wstring const &,bool bold=false);float ExtensionNaturalWidth(JsonObject const &);
     void BudgetExtensions();void PaintExtensionItem(ID2D1DeviceContext*,int);std::wstring ExtensionActionAt(int,float,bool context=false);
     void SyncExtensionMotion(NativeToolbarVisual &,JsonObject const &);void ReportExtensions(bool remove=false);
-    bool paintedTransparentToolbar=false,toolbarCoveredByApplication=false;
-    bool TransparentToolbar()const{return !dock&&Bool(app.model.preferences,L"transparentToolbar")&&!toolbarCoveredByApplication;}
+    bool paintedTransparentToolbar=false,toolbarCoveredByApplication=false,paintedBlackBar=false;
+    // The two covered modes that are not black: "transparent" paints no surface at all,
+    // "acrylic" keeps the blur and only lays a thin scrim over it. toolbarGlass says
+    // whether the compositor gave us the blur this paint, which decides whether the
+    // acrylic mode can stay thin or has to fall back to a readable panel.
+    bool paintedCoveredClear=false,paintedCoveredGlass=false,toolbarGlass=false;
+    // Under a maximised application the original stops showing the wallpaper and paints
+    // the bar out in black. The desktop state wants the wallpaper, the covered state is a
+    // choice, so both ends are named here and the ink follows whichever one wins.
+    std::wstring CoveredBackdrop()const{auto mode=Str(app.model.preferences,L"coveredBackdrop");return mode==L"acrylic"||mode==L"transparent"?mode:L"black";}
+    bool TransparentToolbar()const{return !dock&&Bool(app.model.preferences,L"transparentToolbar",true)&&!toolbarCoveredByApplication;}
+    bool BlackBar()const{return !dock&&toolbarCoveredByApplication&&CoveredBackdrop()==L"black";}
+    bool CoveredClear()const{return !dock&&toolbarCoveredByApplication&&CoveredBackdrop()==L"transparent";}
+    bool CoveredGlass()const{return !dock&&toolbarCoveredByApplication&&CoveredBackdrop()==L"acrylic";}
     bool ToolbarCoveredByApplication()const{
         auto display=MonitorFromRect(&full,MONITOR_DEFAULTTONEAREST);MONITORINFO info{sizeof(info)};
         if(!GetMonitorInfoW(display,&info))return false;
@@ -157,7 +192,7 @@ struct NativeBar : NativePopup
     }
     void SyncToolbarVisuals();void ToolbarFade(Visual const &,bool);
     void AnimateToolbarOffset(Visual const &,float3,bool drop=false);
-    float MeasureToolbarText(std::wstring const &,float);
+    float MeasureToolbarText(std::wstring const &,float,int weight=500);
     JsonArray ToolbarContent(JsonObject const &);float ToolbarContentWidth(JsonObject const &);float ToolbarMetricWidth(JsonObject const &);
     void PaintToolbarItem(ID2D1DeviceContext *,int);void PaintDockItem(ID2D1DeviceContext *,int,bool retainedMedia=false);void SyncDockState(NativeToolbarVisual &,int,float);void SyncMediaTitle(NativeToolbarVisual &,int,float);void SyncMediaSize(NativeToolbarVisual &,int,float,bool);
     void Release(){occlusionAnimating=false;if(toolbarRoot){toolbarRoot.StopAnimation(L"Opacity");toolbarRoot.Opacity(1);}ResetDockBodyMotion();barInteraction.Release(toolbarRoot);dockDissolve.Reset(barHost,toolbarRoot);if(toolbarRoot)ReleaseNativeGlass(toolbarRoot,materialVisual);NativePopup::Release();if(toolbarLayer)toolbarLayer.Children().RemoveAll();toolbarVisuals.clear();dockHoverTop.clear();dockHoverAxis=-FLT_MAX;dockRegionItems.clear();dockRegionDpi=0;toolbarSvg.documents.clear();toolbarBackgroundKey.clear();dropId.clear();dropRows.clear();dropUntil=0;if(hwnd){KillTimer(hwnd,97);KillTimer(hwnd,99);KillTimer(hwnd,103);KillTimer(hwnd,DockPreviewTimer);KillTimer(hwnd,105);edgePointerWatch=false;}hidingToolbar=false;if(toolbarRoot){toolbarRoot.StopAnimation(L"Offset");toolbarRoot.Offset({0,0,0});}}
@@ -221,11 +256,34 @@ struct NativeBar : NativePopup
     void Layout();
     bool barDrag=false,toolbarSequential=false,dragSequential=false;
     JsonObject dragEntry{nullptr};std::wstring dragId,dragSection=L"left";int dragIndex=0;
-    float dragWidth=0,dragGrab=0,dragPointer=0;float toolbarBoundaries[2]{};
+    float dragWidth=0,dragGrab=0,dragPointer=0;float toolbarBoundaries[2]{};bool dragSlotsDirty=false;
+    // T33: the ghost's placement is reported, never polled. One line per real position
+    // change while a bar drag is live, so a bad field names itself instead of a guess.
+    float dragGhostTraceX=FLT_MAX;
+    // T34: one drag-swap line per real change of the swap decision's inputs.
+    float dragSwapTraceX=FLT_MAX,dragSwapTraceCenter=FLT_MAX,dragSwapTraceBest=FLT_MAX,dragSwapTraceCurrent=FLT_MAX,dragSwapTraceScroll=FLT_MAX,dragSwapTraceTargetScroll=FLT_MAX,dragSwapTraceSelfLeft=FLT_MAX,dragSwapTraceSelfRight=FLT_MAX;
+    std::wstring dragSwapTraceTarget,dragSwapTraceDragTarget;bool dragSwapTraceTray=false,dragSwapTraceSelf=false,dragSwapTraceSelfValid=false;size_t dragSwapTraceSlots=0;
+    void TraceDragGhost(float x,float start,float originalLeft,float extra){
+        if(std::abs(start-dragGhostTraceX)<.01f)return;dragGhostTraceX=start;
+        JsonObject detail;Put(detail,L"surface",std::wstring(dock?L"dock":L"toolbar"));
+        Put(detail,L"dpi",static_cast<double>(dpi));Put(detail,L"x",static_cast<double>(x));
+        Put(detail,L"dragPointer",static_cast<double>(dragPointer));Put(detail,L"dragGrab",static_cast<double>(dragGrab));
+        Put(detail,L"originalLeft",static_cast<double>(originalLeft));Put(detail,L"start",static_cast<double>(start));Put(detail,L"center",static_cast<double>(x-dragGrab+dragWidth/2+barScroll-dragTargetScroll));
+        Put(detail,L"extra",static_cast<double>(extra));Put(detail,L"offsetPx",static_cast<double>((start-extra)*dpi/96));
+        Put(detail,L"cursorPx",static_cast<double>((x+contentX)*dpi/96));Put(detail,L"contentX",static_cast<double>(contentX));
+        Put(detail,L"fullLeft",static_cast<double>(full.left));Put(detail,L"fullTop",static_cast<double>(full.top));
+        Put(detail,L"width",static_cast<double>(width));Put(detail,L"height",static_cast<double>(height));
+        if(hwnd)Put(detail,L"windowDpi",static_cast<double>(GetDpiForWindow(hwnd)));
+        POINT cursor{};if(GetCursorPos(&cursor)){Put(detail,L"cursorScreenX",static_cast<double>(cursor.x));Put(detail,L"cursorScreenY",static_cast<double>(cursor.y));}
+        if(barHost){auto offset=barHost.Offset();Put(detail,L"hostOffsetX",static_cast<double>(offset.x));Put(detail,L"hostOffsetY",static_cast<double>(offset.y));}
+        if(toolbarRoot){auto offset=toolbarRoot.Offset();Put(detail,L"rootOffsetX",static_cast<double>(offset.x));Put(detail,L"rootOffsetY",static_cast<double>(offset.y));}
+        if(toolbarLayer){auto offset=toolbarLayer.Offset();Put(detail,L"layerOffsetX",static_cast<double>(offset.x));Put(detail,L"layerOffsetY",static_cast<double>(offset.y));}
+        detail.Insert(L"tray",JsonValue::CreateBooleanValue(dragTray));app.Telemetry(L"drag-ghost",detail);
+    }
     int Hit(float x,float y)const override;
     void ToolbarDrag(float x,float y);
     bool MoveToolbarDrag(float x,float y);
-    void EndToolbarDrag(bool commit);
+    void EndToolbarDrag(bool commit);void RefreshDragTargets();
     static bool TrayRoot(JsonObject const &e){return Str(e,L"nativeModule")==L"magic.tray"||Str(e,L"id")==L"toolbar:@seelen/tb-system-tray";}
     static std::wstring CompoundOwner(JsonObject const &e){auto id=Str(e,L"id");auto owner=Str(e,L"module");return TrayRoot(e)?id:owner;}
     float ToolbarGroupWidth(std::vector<JsonObject> const &);
@@ -292,6 +350,18 @@ struct NativeBar : NativePopup
     }
     void Send(int index, std::wstring verb = L"activate", long long target = 0, std::wstring destination = L"");
     std::wstring menuItemKey,menuJumpStamp;
+    // Everything a standing menu is built from: the item's own fields (brand mark,
+    // style, wordmark, device, label) and the preferences that shape it. A publish
+    // that changes neither leaves the open menu alone. Only what the builder reads is
+    // compared: the item carries window titles and jump lists that change on their own.
+    std::wstring MenuStamp(JsonObject const &item)const{
+        std::wstring value;for(auto const *key:{L"id",L"brandIcon",L"brandIconHide",L"brandLabel",L"brandText",L"brandStyle",L"brandDevice",L"customIcon",L"icon",L"label",L"pinned",L"enabled"}){value+=key;value+=L"=";value+=Str(item,key);value+=L"|";}
+        // Jump lists refresh in place too (the dock's app menu), so they belong to
+        // the same stamp; they are empty for a brand cell, so they never trigger it.
+        value+=JumpStamp(item);
+        if(app.model.preferences)value+=std::wstring(app.model.preferences.Stringify());
+        return value;
+    }
     static std::wstring JumpStamp(JsonObject const &item){std::wstring value;for(auto key:{L"jumpPinned",L"jumpFrequent",L"jumpRecent",L"jumpTasks"})value+=item.GetNamedArray(key,JsonArray{}).Stringify();return value;}
     void Menu(int index,bool refresh=false);
     void SendBar(std::wstring const &verb,std::wstring const &destination=L"",int item=-1);
@@ -313,7 +383,13 @@ struct NativeShell
 {
     App &app;
     std::map<std::wstring, std::unique_ptr<NativeBar>> bars;
-    std::map<std::wstring, Icon> icons;std::map<std::wstring,float> luminances;
+    // A tray icon is drawn exactly as its app ships it, so a black glyph on nothing
+    // (Tailscale) is a hole once the bar goes black, and a white one needs the
+    // opposite treatment. Two numbers tell them apart: how much of the square is
+    // painted at all, and how bright that paint is. They have to be measured while
+    // the PNG is still pixels - an ID2D1Bitmap cannot be read back later.
+    struct IconTone{float coverage=1,ink=1;};
+    std::map<std::wstring, Icon> icons;std::map<std::wstring,IconTone> tones;
     std::set<std::wstring> pending;
     std::unique_ptr<NativePopup> toast;
     double lastVolume = -1;
@@ -362,7 +438,32 @@ struct NativeShell
     unsigned long long orderSequence=0;
     std::vector<std::wstring> provisionalOrder;
     HWND provisionalOwner=nullptr;
-    static JsonObject ToolbarOrderModel(JsonObject const &source,std::vector<std::wstring> const &order){
+    // Tray icons are ordered by the adapter, not by the block order, so an icon drag
+    // needs its own slot. The deadline keeps a freshly dropped arrangement on screen
+    // until the saved order comes back through a snapshot.
+    std::vector<std::wstring> provisionalTray;HWND provisionalTrayOwner=nullptr;ULONGLONG provisionalTrayUntil=0;
+    // Reorder the tray rows inside a built projection, leaving the button and every
+    // other row where they are. Ids are the row ids (`tray:...`), in visual order.
+    static JsonObject OrderTrayIcons(JsonObject const &source,std::vector<std::wstring> const &iconIds){
+        if(iconIds.size()<2)return source;
+        JsonObject result;
+        for(auto group:{L"left",L"center",L"right"}){
+            auto rows=source.GetNamedArray(group,JsonArray{});
+            std::vector<JsonObject> icons;for(auto const &v:rows)if(Str(v.GetObject(),L"type")==L"Tray")icons.push_back(v.GetObject());
+            std::vector<JsonObject> ordered;for(auto const &id:iconIds)for(auto const &row:icons)if(Str(row,L"id")==id){ordered.push_back(row);break;}
+            if(icons.size()<2||ordered.size()!=icons.size()){result.Insert(group,rows);continue;}
+            JsonArray rebuilt;size_t next=0;
+            for(auto const &v:rows){auto row=v.GetObject();if(Str(row,L"type")==L"Tray")rebuilt.Append(ordered[next++]);else rebuilt.Append(row);}
+            result.Insert(group,rebuilt);
+        }
+        return result;
+    }
+    // The tray block is mirrored when it crosses into the left group, so its button stays at
+    // the outer edge. Doing that while a drag is in flight re-orders rows the ghost offsets
+    // were measured against, and the grabbed icon jumps away from the pointer; the caller
+    // therefore suppresses the mirror for the provisional model and lets the committed order
+    // from the adapter carry it.
+    static JsonObject ToolbarOrderModel(JsonObject const &source,std::vector<std::wstring> const &order,bool mirrorTray=true){
         std::map<std::wstring,std::vector<JsonObject>> blocks;std::wstring traySection,trayOwner;
         for(auto group:{L"left",L"center",L"right"})for(auto const &v:source.GetNamedArray(group,JsonArray{})){
             auto item=v.GetObject();auto owner=Str(item,L"module"),id=Str(item,L"id");blocks[owner.empty()?id:owner].push_back(item);
@@ -373,13 +474,17 @@ struct NativeShell
         if(a==order.end()||b==order.end())return source;if(a>b)std::swap(a,b);
         JsonObject projected;for(auto section:{L"left",L"center",L"right"})projected.Insert(section,JsonArray{});
         for(auto it=order.begin();it!=order.end();++it){if(it==a||it==b)continue;auto section=it<a?L"left":it<b?L"center":L"right";
-            auto block=blocks[*it];if(*it==trayOwner&&((traySection==L"left")!=(std::wstring(section)==L"left")))std::reverse(block.begin(),block.end());
+            auto block=blocks[*it];if(mirrorTray&&*it==trayOwner&&((traySection==L"left")!=(std::wstring(section)==L"left")))std::reverse(block.begin(),block.end());
             for(auto const &row:block)projected.GetNamedArray(section).Append(row);
         }for(auto group:{L"left",L"center",L"right"})for(auto const &v:source.GetNamedArray(group,JsonArray{}))if(Str(v.GetObject(),L"type")==L"Uac")projected.GetNamedArray(L"left").Append(v);return projected;
     }
-    void PreviewToolbarOrder(NativeBar &owner,std::vector<std::wstring> const &order){
+    void PreviewToolbarOrder(NativeBar &owner,std::vector<std::wstring> const &order,std::vector<std::wstring> const *trayIcons=nullptr){
         NativeRenderScope projecting(app.relay);
         provisionalOrder=order;provisionalOwner=owner.hwnd;
+        // While the drag runs there is no deadline: the list lives exactly as long as
+        // the gesture does. A commit switches to a deadline instead, so the drop does
+        // not flash back to the saved order while the write is in flight.
+        provisionalTray=trayIcons?*trayIcons:std::vector<std::wstring>{};provisionalTrayOwner=owner.hwnd;provisionalTrayUntil=trayIcons?~0ull:0;
         for(auto const &[_,bar]:bars)if(bar->dock==owner.dock&&bar.get()!=&owner&&bar->data){
             JsonObject projected;for(auto const &v:authoritative)projected.Insert(v.Key(),v.Value());ProjectToolbar(projected);ProjectDock(projected);bar->data=projected;bar->Layout();bar->Draw();
         }
@@ -399,6 +504,27 @@ struct NativeShell
         app.Request(request,[this,token](JsonObject const &response){if(!Bool(response,L"ok")){std::erase_if(pendingOrders,[&](auto const &p){return p.token==token;});if(authoritative)Update(authoritative);JsonObject d;Put(d,L"error",Str(response,L"error"));app.Telemetry(L"toolbar-order-rejected",d);}});
         Put(trace,L"stage",std::wstring(L"queued"));app.Telemetry(L"bar-reorder",trace);
     }
+    // The tray icons are a list the adapter owns, so this commit carries the visual
+    // order and lets the adapter persist it. In the left group the adapter mirrors the
+    // block, which means the order that gets saved is the reverse of the one on screen.
+    void ReorderTraySequence(NativeBar &bar,std::vector<std::wstring> const &rows,std::wstring const &section){
+        provisionalOrder.clear();provisionalOwner=nullptr;
+        std::vector<std::wstring> visual=rows;if(section==L"left")std::reverse(visual.begin(),visual.end());
+        JsonArray values;
+        for(auto const &id:visual){std::wstring stable;for(auto const &entry:bar.entries)if(Str(entry,L"id")==id){stable=Str(entry,L"stableId");break;}if(!stable.empty())values.Append(Text(stable));}
+        if(values.Size()<2)return;
+        provisionalTray=rows;provisionalTrayOwner=bar.hwnd;provisionalTrayUntil=GetTickCount64()+1500;
+        AllowSetForegroundWindow(static_cast<DWORD>(Num(bar.data,L"hostPid")));app.inputEpoch++;
+        JsonObject command,request;Put(command,L"id",std::wstring(L"bar:toolbar"));Put(command,L"verb",std::wstring(L"tray-order"));command.Insert(L"trayOrder",values);
+        Put(request,L"op",std::wstring(L"shell-command"));Put(request,L"window",static_cast<double>(reinterpret_cast<UINT_PTR>(bar.hwnd)));request.Insert(L"command",command);
+        app.Request(request,[this](JsonObject const &response){
+            if(Bool(response,L"ok"))return;
+            provisionalTray.clear();if(authoritative)Update(authoritative);
+            JsonObject detail;Put(detail,L"error",Str(response,L"error"));app.Telemetry(L"tray-order-rejected",detail);
+        });
+        if(authoritative)Update(authoritative);
+        JsonObject trace;Put(trace,L"stage",std::wstring(L"tray"));Put(trace,L"count",static_cast<double>(values.Size()));app.Telemetry(L"bar-reorder",trace);
+    }
     void ProjectToolbar(JsonObject const &data){
         auto receipts=data.GetNamedArray(L"orderReceipts",JsonArray{});
         for(auto const &v:receipts){auto receipt=v.GetObject();auto token=Str(receipt,L"token");
@@ -410,13 +536,17 @@ struct NativeShell
         }
         auto toolbar=ShellObject(data,L"toolbar");
         for(auto const &order:pendingOrders)if(!order.dock)toolbar=ToolbarOrderModel(toolbar,order.items);
-        if(!provisionalOrder.empty()){auto owner=std::find_if(bars.begin(),bars.end(),[&](auto const &v){return v.second->hwnd==provisionalOwner;});if(owner!=bars.end()&&!owner->second->dock)toolbar=ToolbarOrderModel(toolbar,provisionalOrder);}
+        if(!provisionalOrder.empty()){auto owner=std::find_if(bars.begin(),bars.end(),[&](auto const &v){return v.second->hwnd==provisionalOwner;});if(owner!=bars.end()&&!owner->second->dock)toolbar=ToolbarOrderModel(toolbar,provisionalOrder,!owner->second->barDrag);}
+        if(!provisionalTray.empty()){
+            if(GetTickCount64()>provisionalTrayUntil)provisionalTray.clear();
+            else {auto owner=std::find_if(bars.begin(),bars.end(),[&](auto const &v){return v.second->hwnd==provisionalTrayOwner;});if(owner!=bars.end()&&!owner->second->dock)toolbar=OrderTrayIcons(toolbar,provisionalTray);}
+        }
         data.Insert(L"toolbar",toolbar);
     }
     void ProjectDock(JsonObject const &data){
         auto dock=ShellObject(data,L"dock");
         for(auto const &order:pendingOrders)if(order.dock)dock=ToolbarOrderModel(dock,order.items);
-        if(!provisionalOrder.empty()){auto owner=std::find_if(bars.begin(),bars.end(),[&](auto const &v){return v.second->hwnd==provisionalOwner;});if(owner!=bars.end()&&owner->second->dock)dock=ToolbarOrderModel(dock,provisionalOrder);}
+        if(!provisionalOrder.empty()){auto owner=std::find_if(bars.begin(),bars.end(),[&](auto const &v){return v.second->hwnd==provisionalOwner;});if(owner!=bars.end()&&owner->second->dock)dock=ToolbarOrderModel(dock,provisionalOrder,!owner->second->barDrag);}
         data.Insert(L"dock",dock);
     }
     std::map<std::wstring,std::wstring> iconSources;
@@ -493,7 +623,9 @@ struct NativeShell
             if (!live.contains(it->first))
             {
                 HidePreview(it->second.get());
-                if(provisionalOwner==it->second->hwnd){provisionalOrder.clear();provisionalOwner=nullptr;}
+                if(provisionalOwner==it->second->hwnd){provisionalOrder.clear();provisionalOwner=nullptr;provisionalTray.clear();}
+                // The menu's owner is gone, so its rebuild identity is stale.
+                if(app.menus&&app.menus->itemBar==it->second->hwnd){app.menus->Close(false);app.menus->itemKey.clear();app.menus->itemStamp.clear();app.menus->itemBar=nullptr;}
                 it = bars.erase(it);
             }
             else
@@ -526,9 +658,20 @@ struct NativeShell
         lastNotification = Str(notification, L"key");
         lastPaused = Bool(data, L"shortcutsPaused");
         std::map<std::wstring,double> brightness;
-        for(auto const &v:ShellObject(data,L"brightness").GetNamedArray(L"displays",JsonArray{})){
+        // Only a hand deserves a card, but no vendor signal separates one from the
+        // ambient sensor: adaptive brightness is on here, absent on a desktop, and an
+        // OEM's own service can ignore the setting altogether. So the gate rests on the
+        // one fact that travels between them - the provider marks the writes we made.
+        // Those speak by default; "跟随系统全部变化" in the settings window brings back
+        // every external change, which is the old behaviour and exactly what an
+        // auto-brightness machine turns into noise.
+        auto brightnessPayload=ShellObject(data,L"brightness");
+        auto hintPrefs=app.model.preferences;
+        bool hints=Bool(hintPrefs,L"brightnessHints",true),follow=Bool(hintPrefs,L"brightnessFollowSystem");
+        for(auto const &v:brightnessPayload.GetNamedArray(L"displays",JsonArray{})){
             auto row=v.GetObject();auto id=Str(row,L"id");double level=Num(row,L"value",-1);if(level<0||level>1)continue;brightness[id]=level;
-            if(hintsInitialized&&lastBrightness.contains(id)&&std::abs(lastBrightness[id]-level)>.001&&Bool(flyouts,L"enabled",true)&&Bool(flyouts,L"showBrightnessChange",true))Toast(data,L"亮度",level,L"",L"",id);
+            bool ours=Bool(row,L"manual");
+            if(hintsInitialized&&hints&&(follow||ours)&&lastBrightness.contains(id)&&std::abs(lastBrightness[id]-level)>.001&&Bool(flyouts,L"enabled",true))Toast(data,L"亮度",level,L"",L"",id);
         }
         lastBrightness = std::move(brightness);
         std::map<std::wstring, std::wstring> workspaces;
@@ -585,7 +728,7 @@ struct NativeShell
     }
     void ClearIcons()
     {
-        app.honor.Clear();icons.clear();luminances.clear();
+        app.honor.Clear();icons.clear();tones.clear();
         pending.clear();
         iconBytes = 0;
     }
@@ -662,7 +805,7 @@ struct NativeShell
                     auto old = std::min_element(icons.begin(), icons.end(), [](auto const &a, auto const &b) {
                         return a.second.age < b.second.age;
                     });
-                    iconBytes -= old->second.bytes;luminances.erase(old->first);
+                    iconBytes -= old->second.bytes;tones.erase(old->first);
                     icons.erase(old);
                 }
                 com_ptr<IWICFormatConverter> converter;
@@ -673,7 +816,22 @@ struct NativeShell
                 check_hresult(app.graphics.d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, context.put()));
                 Icon icon;
                 check_hresult(context->CreateBitmapFromWicBitmap(converter.get(), nullptr, icon.bitmap.put()));
-                std::vector<BYTE> pixels(static_cast<size_t>(w)*h*4);if(SUCCEEDED(converter->CopyPixels(nullptr,w*4,static_cast<UINT>(pixels.size()),pixels.data()))){double sum=0;for(size_t k=0;k<pixels.size();k+=4){double alpha=pixels[k+3];if(alpha>0)sum+=(.299*pixels[k+2]+.587*pixels[k+1]+.114*pixels[k])*255/alpha;}luminances[key]=static_cast<float>(sum/(w*h));}
+                std::vector<BYTE> pixels(static_cast<size_t>(w)*h*4);if(SUCCEEDED(converter->CopyPixels(nullptr,w*4,static_cast<UINT>(pixels.size()),pixels.data()))){
+                    // PBGRA is premultiplied, so a pixel's colour has to be divided back
+                    // by its own alpha before it can be compared to anything. The old
+                    // formula averaged over the whole canvas, which mixed "how much is
+                    // painted" into "how bright the paint is" - a white glyph covering a
+                    // third of the square scored 0.33 and looked as dark as navy.
+                    double painted=0,brightness=0;
+                    for(size_t k=0;k<pixels.size();k+=4){
+                        double alpha=pixels[k+3];if(alpha<=4)continue;
+                        painted+=alpha/255;
+                        brightness+=alpha/255*(.299*pixels[k+2]+.587*pixels[k+1]+.114*pixels[k])/alpha;
+                    }
+                    IconTone tone;
+                    if(painted>0){tone.coverage=static_cast<float>(painted/(w*h));tone.ink=static_cast<float>(brightness/painted);}
+                    tones[key]=tone;
+                }
                 icon.bytes = allocation;
                 icon.age = ++iconAge;
                 if(auto old=icons.find(key);old!=icons.end())iconBytes-=old->second.bytes;
@@ -726,6 +884,7 @@ inline void NativeBar::RefreshDpi(){
     if(!dpiRefreshPending||!hwnd||app.stopping)return;
     if(NativeRenderScope::busy){app.QueueRenderWork();return;}
     {NativeRenderScope updating(app.relay);dpiRefreshPending=false;dpi=pendingDpi;Release();}
+    {JsonObject detail;Put(detail,L"stage",std::wstring(L"dpichanged"));Put(detail,L"dpi",static_cast<double>(dpi));Put(detail,L"monitor",monitor);detail.Insert(L"dock",JsonValue::CreateBooleanValue(dock));Put(detail,L"windowDpi",static_cast<double>(GetDpiForWindow(hwnd)));app.Telemetry(L"bar-dpi",detail);}
     Draw();
 }
 inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &screen,bool notifyReady)
@@ -743,7 +902,8 @@ inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &scre
     dark = Bool(snapshot, L"dark",Preview70Theme::systemDark);
     auto rect = screen.GetNamedObject(L"rect");
     float scale = static_cast<float>(Num(screen, L"scale", 1));
-    dpi = 96 * scale;
+    float previousDpi=dpi;dpi = 96 * scale;
+    if(dpi!=previousDpi){JsonObject detail;Put(detail,L"stage",std::wstring(L"update"));Put(detail,L"dpi",static_cast<double>(dpi));Put(detail,L"scale",static_cast<double>(scale));Put(detail,L"monitor",monitor);detail.Insert(L"dock",JsonValue::CreateBooleanValue(dock));if(hwnd)Put(detail,L"windowDpi",static_cast<double>(GetDpiForWindow(hwnd)));app.Telemetry(L"bar-dpi",detail);}
     int left = static_cast<int>(Num(rect, L"left")), top = static_cast<int>(Num(rect, L"top")),
         right = static_cast<int>(Num(rect, L"right")), bottom = static_cast<int>(Num(rect, L"bottom"));
     if(dock&&Bool(screen,L"toolbar")){auto toolbar=ShellObject(snapshot,L"toolbarSettings");int reserve=static_cast<int>((Num(toolbar,L"itemSize",16)+2*Num(toolbar,L"padding",8)+2*Num(toolbar,L"margin"))*scale);if(Str(toolbar,L"position")==L"Bottom")bottom-=reserve;else top+=reserve;}
@@ -785,6 +945,16 @@ inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &scre
         SendMessageW(tooltip,TTM_SETMAXTIPWIDTH,0,300);
     }
     bool reserve=!dock&&!Bool(snapshot,L"preview")&&Str(settings,L"hideMode")==L"Never";
+    // A hidden taskbar keeps its work-area reservation, so the edge is already
+    // taken. Reserving it again makes ABM_QUERYPOS/SETPOS clamp the bar down by
+    // the taskbar thickness. Only reserve when the edge is actually free.
+    if(reserve){
+        RECT workArea{};
+        if(SystemParametersInfoW(SPI_GETWORKAREA,0,&workArea,0)){
+            LONG occupied=bottomBar?(bottom-workArea.bottom):(workArea.top-top);
+            if(occupied>=static_cast<LONG>(h*scale))reserve=false;
+        }
+    }
     if(reserved&&!reserve){APPBARDATA bar{sizeof(bar)};bar.hWnd=hwnd;SHAppBarMessage(ABM_REMOVE,&bar);reserved=false;}
     if(reserve){
         APPBARDATA bar{sizeof(bar)};bar.hWnd=hwnd;bar.uCallbackMessage=WM_APP+21;bar.uEdge=bottomBar?ABE_BOTTOM:ABE_TOP;
@@ -796,7 +966,11 @@ inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &scre
             LONG inset=static_cast<LONG>(h*scale)+2*margin;
             bar.rc={left,bottomBar?bottom-inset:top,right,bottomBar?bottom:top+inset};
             SHAppBarMessage(ABM_QUERYPOS,&bar);
-            if(bottomBar)bar.rc.top=bar.rc.bottom-inset;else bar.rc.bottom=bar.rc.top+inset;
+            // The shell still treats a docked-but-hidden taskbar as occupying that
+            // edge, so ABM_QUERYPOS pushes us inward by the taskbar thickness.
+            // The bar must sit on the monitor edge (rcMonitor), so restore it.
+            if(bottomBar){bar.rc.top=bottom-inset;bar.rc.bottom=bottom;}
+            else{bar.rc.top=top;bar.rc.bottom=top+inset;}
             if(added||memcmp(&reservedBar,&bar.rc,sizeof(bar.rc))!=0)SHAppBarMessage(ABM_SETPOS,&bar);
             reservedBar=bar.rc;positioningBar=false;
         }
@@ -810,7 +984,10 @@ inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &scre
         for(auto const &entry:entries)if(entry.HasKey(L"windows"))for(auto const &v:entry.GetNamedArray(L"windows")){auto window=v.GetObject();auto id=static_cast<long long>(Num(window,L"hwnd"));live.insert(id);if((Str(window,L"attention")==L"Flashing"||Str(window,L"attention")==L"Highlighted")&&id!=focused){flashing|=Str(window,L"attention")==L"Flashing";attentionWindows.insert(id);}}
         std::erase_if(attentionWindows,[&](long long id){return !live.contains(id)||id==focused;});if(mode!=L"UntilActivated")attentionWindows.clear();attentionReveal=mode==L"WhileFlashing"?flashing:mode==L"UntilActivated"&&!attentionWindows.empty();if(attentionReveal)Reveal();
     }
-    if(!dock)toolbarCoveredByApplication=Bool(app.model.preferences,L"transparentToolbar")&&ToolbarCoveredByApplication();
+    // "Covered" is a fact about the screen, not a consequence of the transparency
+    // switch above it: with that switch off the three backdrop choices still have to
+    // apply, which is the only way "fullscreen turns the bar black" can be tested.
+    if(!dock)toolbarCoveredByApplication=ToolbarCoveredByApplication();
     bool fullscreen=ForegroundFullscreen();
     // Read geometry at the event, rather than trusting a cached focus payload.
     // A valid created bar is ready even while a fullscreen entrance overlay
@@ -853,22 +1030,29 @@ inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &scre
         PositionBar(SWP_NOACTIVATE | SWP_SHOWWINDOW);
     else
         Hide(false,false);
-    if (!edge && (moved || dockBackdropDirty || paintedTransparentToolbar!=TransparentToolbar() ||
+    if (!edge && (moved || dockBackdropDirty || paintedTransparentToolbar!=TransparentToolbar() || paintedBlackBar!=BlackBar() ||
+                  paintedCoveredClear!=CoveredClear() || paintedCoveredGlass!=CoveredGlass() ||
                   old != to_string(snapshot.GetNamedObject(dock ? L"dock" : L"toolbar").Stringify()) +
                              to_string(settings.Stringify()) + std::to_string(dark) +
                              std::to_string(Num(snapshot.GetNamedObject(L"focused"), L"hwnd")) ||
                   !surface))
         Draw();
     if(dock&&dockEnterPending&&!edge){dockEnterPending=false;StartDockEntrance();}
-    if(dock&&menuOpen&&!menuItemKey.empty()&&app.menus&&app.menus->visibleLevels==1&&!(GetAsyncKeyState(VK_LBUTTON)&0x8000)){
-        for(size_t i=0;i<rows.size()&&i<entries.size();++i)if(rows[i].id==menuItemKey&&JumpStamp(entries[i])!=menuJumpStamp){Menu(static_cast<int>(i),true);break;}
+    // A standing menu is owned by one bar item. When that item's data (or the
+    // preferences that shape the menu) actually changes, regenerate it from the same
+    // builder and let the cascade restore the level the reader is on.
+    if(menuOpen&&app.menus&&app.menus->itemBar==hwnd&&!app.menus->itemKey.empty()&&!(GetAsyncKeyState(VK_LBUTTON)&0x8000)){
+        auto &menus=*app.menus;
+        for(size_t i=0;i<rows.size()&&i<entries.size();++i)if(rows[i].id==menus.itemKey){
+            if(MenuStamp(entries[i])!=menus.itemStamp)Menu(static_cast<int>(i),true);
+            break;}
     }
 }
 inline std::vector<JsonObject> NativeBar::GroupItems(wchar_t const *section,JsonObject const &projected)
 {
     std::vector<JsonObject> result;
     auto source=projected?projected:data.GetNamedObject(dock?L"dock":L"toolbar");
-    if(!projected&&barDrag)source=NativeShell::ToolbarOrderModel(source,dragOrder);
+    if(!projected&&barDrag){source=NativeShell::ToolbarOrderModel(source,dragOrder,false);if(dragTray)source=NativeShell::OrderTrayIcons(source,dragTrayOrder);}
     for(auto const &v:source.GetNamedArray(section)){
         auto item=JsonObject::Parse(v.GetObject().Stringify());
         if(Str(item,L"nativeModule")==L"magic.recycle")Put(item,L"trashCount",app.model.recycleFull?1.0:0.0);
@@ -933,10 +1117,12 @@ inline void NativeBar::Layout()
 {
     NativeRenderScope layout(app.relay);
     if(!dock)BudgetExtensions();
-    rows.clear();entries.clear();sectionSeparators.clear();
+    rows.clear();entries.clear();sectionSeparators.clear();if(barDrag)dragSlotsDirty=true;
     float axis=Vertical()?height:width;
     auto source=data.GetNamedObject(dock?L"dock":L"toolbar");
-    if(barDrag)source=NativeShell::ToolbarOrderModel(source,dragOrder);
+    // The toolbar has no floating ghost row: the gesture shows itself by re-flowing the
+    // slots, so the tray order has to reach the layout or a dragged icon would only dim.
+    if(barDrag){source=NativeShell::ToolbarOrderModel(source,dragOrder,false);if(dragTray)source=NativeShell::OrderTrayIcons(source,dragTrayOrder);}
     std::array groups{GroupItems(L"left",source),GroupItems(L"center",source),GroupItems(L"right",source)};
     float groupWidths[3]{};
     if(!dock){
@@ -947,7 +1133,7 @@ inline void NativeBar::Layout()
         groupWidths[1]+=16+(groups[1].empty()?3:4)*g;
         toolbarSequential=2*std::max(groupWidths[0],groupWidths[2])+groupWidths[1]>width-4*padding+.5f;
         contentLength=groupWidths[0]+groupWidths[1]+groupWidths[2]+4*padding+2*g;
-        barScroll=std::clamp(barScroll,0.f,std::max(0.f,contentLength-width));
+        barScroll=std::clamp(barScroll,0.f,std::max(0.f,contentLength-width));dragRowScroll=barScroll;
         float cursor=2*padding-(toolbarSequential?barScroll:0),spare=std::max(0.f,width-contentLength);
         for(int gi=0;gi<3;gi++){
             auto section=gi==0?L"left":gi==1?L"center":L"right";auto const &values=groups[gi];
@@ -959,7 +1145,7 @@ inline void NativeBar::Layout()
                 if(!compound.empty()&&compound!=previous){
                     float bundle=padding;for(size_t j=i;j<values.size()&&CompoundOwner(values[j])==compound;++j)bundle+=ItemWidth(values[j]);
                     PopupRow parent;parent.id=parent.key=compound+L":parent";parent.control=L"module-parent";parent.rect={start,padding/2,start+bundle,height-padding/2};parent.label=L"System Tray";
-                    JsonObject e;Put(e,L"id",parent.id);Put(e,L"module",compound);Put(e,L"commandId",compound);Put(e,L"compoundParent",true);Put(e,L"passive",true);Put(e,L"section",std::wstring(section));rows.push_back(parent);entries.push_back(e);start+=padding/2;
+                    JsonObject e;Put(e,L"id",parent.id);Put(e,L"module",compound);Put(e,L"commandId",compound);e.Insert(L"compoundParent",JsonValue::CreateBooleanValue(true));Put(e,L"passive",true);Put(e,L"section",std::wstring(section));rows.push_back(parent);entries.push_back(e);start+=padding/2;
                 }
                 float w=ItemWidth(item);PopupRow r;r.id=r.key=Str(item,L"id");r.label=Bool(item,L"clock")?ToolbarClock(data):Str(item,L"label");r.rect={start,padding/2,start+w,height-padding/2};r.enabled=Str(item,L"type")!=L"Extension"||Bool(item,L"extensionGranted");r.offscreen=r.rect.right<=0||r.rect.left>=width;
                 Put(item,L"section",std::wstring(section));rows.push_back(r);entries.push_back(item);start+=w;
@@ -971,12 +1157,13 @@ inline void NativeBar::Layout()
         }
         if(barDrag)for(size_t i=0;i<dragEntries.size();++i){PopupRow r;r.id=r.key=Str(dragEntries[i],L"id");r.label=Str(dragEntries[i],L"label");r.control=L"drag-ghost";
             auto original=dragRects[i];float start=dragPointer-dragGrab+original.left;
+            if(Str(dragEntries[i],L"id")==dragId)TraceDragGhost(dragPointer,start,original.left,dock?8.f:CompoundOwner(dragEntries[i]).empty()?0.f:2.f);
             r.rect={start,padding/2,start+original.right-original.left,height-padding/2};rows.push_back(r);entries.push_back(dragEntries[i]);}
         for(int side=0;side<2;side++){PopupRow r;r.id=r.key=side?L"@corner:right":L"@corner:left";r.control=L"corner";r.enabled=true;r.rect={side?width-10:0,0,side?width:10,height};JsonObject e;e.Insert(L"corner",JsonValue::CreateBooleanValue(true));Put(e,L"tooltip",BarText(L"show_desktop"));rows.push_back(r);entries.push_back(e);}
         if(focus>=static_cast<int>(rows.size()))focus=-1;
         return;
     }
-    barScroll=std::clamp(barScroll,0.f,std::max(0.f,contentLength-axis));float x=padding-((dock||toolbarSequential)?barScroll:0);bool priorGroup=false;int sectionIndex=0;
+    barScroll=std::clamp(barScroll,0.f,std::max(0.f,contentLength-axis));dragRowScroll=barScroll;float x=padding-((dock||toolbarSequential)?barScroll:0);bool priorGroup=false;int sectionIndex=0;
     for(auto const *section:{L"left",L"center",L"right"}){
         auto const &values=groups[sectionIndex];float groupWidth=0;
         bool full=dock&&Str(settings,L"mode")==L"FullWidth"&&contentLength<=axis;
@@ -1001,10 +1188,27 @@ inline void NativeBar::Layout()
         ++sectionIndex;
     }
     if(!dock&&!toolbarSequential){toolbarBoundaries[0]=(padding+groupWidths[0]+(width-groupWidths[1])/2)/2;toolbarBoundaries[1]=((width+groupWidths[1])/2+width-padding-groupWidths[2])/2;}
-    if(barDrag&&!dock){PopupRow ghost;ghost.id=ghost.key=dragId;ghost.label=Str(dragEntry,L"label");ghost.control=L"drag-ghost";ghost.rect={dragPointer-dragGrab,padding,dragPointer-dragGrab+dragWidth,height-padding};rows.push_back(ghost);entries.push_back(dragEntry);}
     if(dock&&barDrag)for(size_t i=0;i<dragEntries.size();++i){PopupRow r;r.id=r.key=Str(dragEntries[i],L"visualId").empty()?Str(dragEntries[i],L"key"):Str(dragEntries[i],L"visualId");r.label=Str(dragEntries[i],L"label");r.control=L"drag-ghost";auto original=dragRects[i];float start=dragPointer-dragGrab+(Vertical()?original.top:original.left);
         r.rect=Vertical()?D2D1_RECT_F{padding,start,width-padding,start+original.bottom-original.top}:D2D1_RECT_F{start,padding,start+original.right-original.left,height-padding};rows.push_back(r);entries.push_back(dragEntries[i]);}
     if(focus>=static_cast<int>(rows.size()))focus=-1;
+}
+inline void NativeBar::RefreshDragTargets()
+{
+    if(!barDrag)dragTargetScroll=barScroll; // T36: basis fixed once per gesture
+    dragTargets.clear();dragSelfRect={};dragSelfRectValid=false;float frame=dragRowScroll-dragTargetScroll;
+    // Slots and the dragged row are stored in the fixed dragTargetScroll frame. The rows
+    // were laid out minus dragRowScroll, so add the difference here; a refresh then only
+    // updates geometry and never moves cursorContent.
+    auto record=[&](std::wstring const &id,D2D1_RECT_F const &rect){D2D1_RECT_F r=rect;if(Vertical()){r.top+=frame;r.bottom+=frame;}else{r.left+=frame;r.right+=frame;}
+        dragTargets.emplace_back(id,Vertical()?(r.top+r.bottom)/2:(r.left+r.right)/2);
+        if(id!=dragId)return;if(!dragSelfRectValid){dragSelfRect=r;dragSelfRectValid=true;}else{dragSelfRect.left=std::min(dragSelfRect.left,r.left);dragSelfRect.right=std::max(dragSelfRect.right,r.right);dragSelfRect.top=std::min(dragSelfRect.top,r.top);dragSelfRect.bottom=std::max(dragSelfRect.bottom,r.bottom);}};
+    if(dragTray){
+        for(size_t j=0;j<rows.size();++j){auto const &r=rows[j];if(r.control==L"drag-ghost"||Str(entries[j],L"type")!=L"Tray"||Str(entries[j],L"module")!=dragTrayOwner)continue;
+            record(r.id,r.rect);}
+    }else for(size_t j=0;j<rows.size();++j){auto const &r=rows[j];if((!CompoundOwner(entries[j]).empty()&&!Bool(entries[j],L"compoundParent"))||r.control==L"drag-ghost"||r.control==L"corner"||r.id==L"@magic/pages")continue;
+        auto id=Str(entries[j],dock?L"key":L"module");if(id.empty())id=r.id;
+        if(std::find(dragOrder.begin(),dragOrder.end(),id)!=dragOrder.end())record(id,r.rect);}
+    dragSlotsDirty=false;
 }
 inline void NativeBar::ToolbarDrag(float x,float y)
 {
@@ -1020,21 +1224,35 @@ inline bool NativeBar::MoveToolbarDrag(float x,float y)
     if(!barDrag){
         auto found=std::find_if(rows.begin(),rows.end(),[&](auto const &r){return r.id==downId;});if(found==rows.end())return false;
         int i=static_cast<int>(found-rows.begin());if(found->id==L"@magic/pages"||found->control==L"corner"||Str(entries[i],L"type")==L"Recovery"||Str(entries[i],L"key")==L"@magic/recovery-separator")return false;
-        dragId=Str(entries[i],dock?L"commandId":L"module");if(dragId.empty())dragId=dock?Str(entries[i],L"key"):found->id;
+        // An icon inside the tray block drags on its own; the block's button keeps
+        // dragging the whole module, so both gestures survive the split.
+        bool trayRow=!dock&&Str(entries[i],L"type")==L"Tray";
+        dragTray=trayRow;dragTrayOrder.clear();dragTrayOriginal.clear();
+        if(trayRow){dragId=found->id;dragTrayOwner=Str(entries[i],L"module");dragTraySection=Str(entries[i],L"section");}
+        else dragId=Str(entries[i],dock?L"commandId":L"module");
+        if(dragId.empty())dragId=dock?Str(entries[i],L"key"):found->id;
         dragEntries.clear();dragRects.clear();float left=Vertical()?height:width,right=0;
-        for(size_t j=0;j<entries.size();++j)if(rows[j].id==dragId||Str(entries[j],dock?L"key":L"module")==dragId){dragEntries.push_back(entries[j]);dragRects.push_back(rows[j].rect);left=std::min(left,Vertical()?rows[j].rect.top:rows[j].rect.left);right=std::max(right,Vertical()?rows[j].rect.bottom:rows[j].rect.right);dragSection=Str(entries[j],L"section");dragIndex=static_cast<int>(Num(entries[j],L"configurationIndex"));}
+        if(trayRow){dragEntries.push_back(entries[i]);dragRects.push_back(rows[i].rect);left=Vertical()?rows[i].rect.top:rows[i].rect.left;right=Vertical()?rows[i].rect.bottom:rows[i].rect.right;dragSection=Str(entries[i],L"section");dragIndex=static_cast<int>(Num(entries[i],L"configurationIndex"));}
+        else for(size_t j=0;j<entries.size();++j)if(rows[j].id==dragId||Str(entries[j],dock?L"key":L"module")==dragId){dragEntries.push_back(entries[j]);dragRects.push_back(rows[j].rect);left=std::min(left,Vertical()?rows[j].rect.top:rows[j].rect.left);right=std::max(right,Vertical()?rows[j].rect.bottom:rows[j].rect.right);dragSection=Str(entries[j],L"section");dragIndex=static_cast<int>(Num(entries[j],L"configurationIndex"));}
         if(dragEntries.empty()&&found->control==L"bar-separator"){JsonObject e;Put(e,L"id",found->id);Put(e,L"passive",true);dragEntries.push_back(e);dragRects.push_back(found->rect);left=found->rect.left;right=found->rect.right;}
         if(dragEntries.empty())return false;
+        // T39: only a whole-block drag of the tray module folds its icons into the
+        // button; a single tray icon keeps the plain ghost. The target, the grab and
+        // the order stay frozen below, so nothing about the swap arithmetic changes.
+        trayCollapseActive=!dock&&!trayRow&&std::any_of(dragEntries.begin(),dragEntries.end(),[](JsonObject const &e){return TrayRoot(e);});
+        trayCollapsedGhosts.clear();
         dragOrder.clear();for(auto section:{L"left",L"center",L"right"}){if(std::wstring(section)==L"center")dragOrder.push_back(L"@boundary:left");for(auto const &v:data.GetNamedObject(dock?L"dock":L"toolbar").GetNamedArray(section)){auto item=v.GetObject();if(Str(item,L"type")!=L"Tray"&&Str(item,L"type")!=L"Uac"&&Str(item,L"type")!=L"Recovery"&&Str(item,L"key")!=L"@magic/recovery-separator")dragOrder.push_back(dock?Str(item,L"key"):Str(item,L"id"));}if(std::wstring(section)==L"center")dragOrder.push_back(L"@boundary:right");}
         dragOriginalOrder=dragOrder;
-        // Freeze collision geometry before projecting the new order. Measuring
-        // freshly reflowed slots makes unequal-width neighbours swap back.
-        dragTargets.clear();dragTarget=dragId;dragTargetScroll=barScroll;
-        for(size_t j=0;j<rows.size();++j){auto const &r=rows[j];if((!CompoundOwner(entries[j]).empty()&&!Bool(entries[j],L"compoundParent"))||r.control==L"drag-ghost"||r.control==L"corner"||r.id==L"@magic/pages")continue;
-            auto id=Str(entries[j],dock?L"key":L"module");if(id.empty())id=r.id;
-            if(std::find(dragOrder.begin(),dragOrder.end(),id)!=dragOrder.end())dragTargets.emplace_back(id,Vertical()?(r.rect.top+r.rect.bottom)/2:(r.rect.left+r.rect.right)/2);}
+        // The icons keep the order the adapter published, so the drag starts from the
+        // arrangement on screen rather than from a remembered list.
+        if(trayRow)for(auto section:{L"left",L"center",L"right"})for(auto const &v:data.GetNamedObject(dock?L"dock":L"toolbar").GetNamedArray(section)){auto item=v.GetObject();if(Str(item,L"type")==L"Tray"&&Str(item,L"module")==dragTrayOwner)dragTrayOrder.push_back(Str(item,L"id"));}
+        dragTrayOriginal=dragTrayOrder;
+        // T35: slots are rebuilt after every reflow (RefreshDragTargets), so the next
+        // swap measures the layout the user is actually looking at.
+        dragTarget=dragId;RefreshDragTargets();
         for(auto &r:dragRects){if(Vertical()){r.top-=left;r.bottom-=left;}else{r.left-=left;r.right-=left;}}
         dragEntry=entries[i];dragWidth=right-left;dragGrab=(Vertical()?downPoint.y:downPoint.x)*96/dpi-(Vertical()?contentY:contentX)-left;
+        {JsonObject detail;Put(detail,L"surface",std::wstring(dock?L"dock":L"toolbar"));Put(detail,L"dpi",static_cast<double>(dpi));Put(detail,L"downPx",static_cast<double>(downPoint.x));Put(detail,L"downDip",static_cast<double>(downPoint.x*96/dpi));Put(detail,L"groupLeft",static_cast<double>(left));Put(detail,L"groupRight",static_cast<double>(right));Put(detail,L"dragGrab",static_cast<double>(dragGrab));Put(detail,L"contentX",static_cast<double>(contentX));Put(detail,L"fullLeft",static_cast<double>(full.left));Put(detail,L"width",static_cast<double>(width));if(hwnd)Put(detail,L"windowDpi",static_cast<double>(GetDpiForWindow(hwnd)));detail.Insert(L"tray",JsonValue::CreateBooleanValue(dragTray));app.Telemetry(L"drag-ghost-start",detail);dragGhostTraceX=FLT_MAX;dragSwapTraceX=FLT_MAX;dragSwapTraceCenter=FLT_MAX;dragSwapTraceBest=FLT_MAX;dragSwapTraceCurrent=FLT_MAX;dragSwapTraceScroll=FLT_MAX;dragSwapTraceTargetScroll=FLT_MAX;dragSwapTraceTarget.clear();dragSwapTraceDragTarget.clear();dragSwapTraceTray=false;dragSwapTraceSlots=0;dragSwapTraceSelf=false;dragSwapTraceSelfValid=false;dragSwapTraceSelfLeft=FLT_MAX;dragSwapTraceSelfRight=FLT_MAX;lastSwapCursor=FLT_MAX;}
         dragSequential=toolbarSequential;barDrag=true;LockDockReorderHover();previousFocus=GetForegroundWindow();SetForegroundWindow(hwnd);SetFocus(hwnd);KillTimer(hwnd,92);KillTimer(hwnd,98);hidePending=false;
         KillTimer(hwnd,94);shell.HidePreview(this);HideBarTooltip();if(tooltip)SendMessageW(tooltip,TTM_POP,0,0);
     }
@@ -1042,17 +1260,53 @@ inline bool NativeBar::MoveToolbarDrag(float x,float y)
     // must not cancel a valid captured drag.
     if(Vertical())x=y;dragPointer=x;
     if(dock||toolbarSequential){if(x<24)barScroll=std::max(0.f,barScroll-12);else if(x>(Vertical()?height:width)-24)barScroll=std::min(std::max(0.f,contentLength-(Vertical()?height:width)),barScroll+12);}
-    float center=x-dragGrab+dragWidth/2+barScroll-dragTargetScroll,best=FLT_MAX,currentDistance=FLT_MAX;std::wstring target;
-    for(auto const &[id,slot]:dragTargets){float distance=std::abs(center-slot);if(id==dragTarget)currentDistance=std::min(currentDistance,distance);if(distance<best){best=distance;target=id;}}
-    if(!target.empty()&&target!=dragTarget&&best+4<currentDistance){
-        auto next=dragOriginalOrder;auto from=std::find(next.begin(),next.end(),dragId),to=std::find(next.begin(),next.end(),target);
-        if(from!=next.end()&&to!=next.end()){auto index=static_cast<size_t>(to-next.begin());auto moving=*from;next.erase(from);next.insert(next.begin()+index,std::move(moving));dragTarget=target;
-            if(next!=dragOrder){dragOrder=std::move(next);changed=true;SetTimer(hwnd,102,300,nullptr);}}
+    bool slotsRefreshed=false;if(dragSlotsDirty){RefreshDragTargets();slotsRefreshed=true;}
+    // T35: the pointer, not the block centre, picks the slot. Slots were measured in the
+    // dragTargetScroll frame, so map the pointer into that frame before comparing.
+    float cursorContent=x+barScroll-dragTargetScroll,best=FLT_MAX,currentDistance=FLT_MAX,targetLeft=0,targetRight=0;std::wstring target;
+    // T37: the dragged row's own slot is the yardstick, never a destination. Taking it as
+    // a target rebuilt the original order (the row "swapped" with itself), which teleported
+    // the row back to its start slot while the pointer kept moving, so the next nearest-slot
+    // pick could land on a distant neighbour. currentDistance keys on the row's own slot now;
+    // keying it on the last swap target disabled the "clearly closer" guard right after a swap.
+    for(size_t i=0;i<dragTargets.size();++i){auto const &[id,slot]=dragTargets[i];float distance=std::abs(cursorContent-slot);if(id==dragId){currentDistance=std::min(currentDistance,distance);continue;}if(distance<best){best=distance;target=id;float stepLeft=i?slot-dragTargets[i-1].second:(i+1<dragTargets.size()?dragTargets[i+1].second-slot:0),stepRight=i+1<dragTargets.size()?dragTargets[i+1].second-slot:(i?slot-dragTargets[i-1].second:0);targetLeft=slot-stepLeft/2;targetRight=slot+stepRight/2;}}
+    if(currentDistance==FLT_MAX&&dragSelfRectValid)currentDistance=std::abs(cursorContent-(Vertical()?(dragSelfRect.top+dragSelfRect.bottom)/2:(dragSelfRect.left+dragSelfRect.right)/2));
+    // T36: a 296 DIP row grabbed 273.5 from its left edge keeps the pointer far from
+    // its own slot centre, so centre distance calls a row that still sits under the
+    // pointer "not mine". On the dragged row's own rect, containment wins: the target
+    // is the row itself and no swap is considered. The 4 DIP halo also covers the
+    // Voronoi edge, which for a 296 wide row lies 2.5 DIP outside the rect.
+    bool selfHit=false;if(dragSelfRectValid){float selfStart=Vertical()?dragSelfRect.top:dragSelfRect.left,selfEnd=Vertical()?dragSelfRect.bottom:dragSelfRect.right;selfHit=cursorContent>=selfStart-4&&cursorContent<=selfEnd+4;}
+    if(selfHit){target=dragId;best=0;targetLeft=Vertical()?dragSelfRect.top:dragSelfRect.left;targetRight=Vertical()?dragSelfRect.bottom:dragSelfRect.right;}
+    if(!selfHit&&!target.empty()&&target!=dragTarget&&best+4<currentDistance&&std::abs(cursorContent-lastSwapCursor)>=4){lastSwapCursor=cursorContent;
+        if(dragTray){
+            auto next=dragTrayOriginal;auto from=std::find(next.begin(),next.end(),dragId),to=std::find(next.begin(),next.end(),target);
+            if(from!=next.end()&&to!=next.end()){auto index=static_cast<size_t>(to-next.begin());auto moving=*from;next.erase(from);next.insert(next.begin()+index,std::move(moving));dragTarget=target;
+                if(next!=dragTrayOrder){dragTrayOrder=std::move(next);changed=true;SetTimer(hwnd,102,300,nullptr);}}
+        }else{
+            auto next=dragOriginalOrder;auto from=std::find(next.begin(),next.end(),dragId),to=std::find(next.begin(),next.end(),target);
+            if(from!=next.end()&&to!=next.end()){auto index=static_cast<size_t>(to-next.begin());auto moving=*from;next.erase(from);next.insert(next.begin()+index,std::move(moving));dragTarget=target;
+                if(next!=dragOrder){dragOrder=std::move(next);changed=true;SetTimer(hwnd,102,300,nullptr);}}
+        }
     }
+    // T34: report the swap decision only when one of its inputs changes; no polling.
+    if(barDrag){
+        float selfLeft=dragSelfRectValid?(Vertical()?dragSelfRect.top:dragSelfRect.left):0,selfRight=dragSelfRectValid?(Vertical()?dragSelfRect.bottom:dragSelfRect.right):0;
+        bool trace=std::abs(x-dragSwapTraceX)>=.01f||std::abs(cursorContent-dragSwapTraceCenter)>=.01f||std::abs(best-dragSwapTraceBest)>=.01f||std::abs(currentDistance-dragSwapTraceCurrent)>=.01f||std::abs(barScroll-dragSwapTraceScroll)>=.01f||std::abs(dragTargetScroll-dragSwapTraceTargetScroll)>=.01f||target!=dragSwapTraceTarget||dragTarget!=dragSwapTraceDragTarget||dragTray!=dragSwapTraceTray||dragTargets.size()!=dragSwapTraceSlots||selfHit!=dragSwapTraceSelf||dragSelfRectValid!=dragSwapTraceSelfValid||std::abs(selfLeft-dragSwapTraceSelfLeft)>=.01f||std::abs(selfRight-dragSwapTraceSelfRight)>=.01f||slotsRefreshed;
+        if(trace){
+            dragSwapTraceX=x;dragSwapTraceCenter=cursorContent;dragSwapTraceBest=best;dragSwapTraceCurrent=currentDistance;dragSwapTraceScroll=barScroll;dragSwapTraceTargetScroll=dragTargetScroll;dragSwapTraceTarget=target;dragSwapTraceDragTarget=dragTarget;dragSwapTraceTray=dragTray;dragSwapTraceSlots=dragTargets.size();dragSwapTraceSelf=selfHit;dragSwapTraceSelfValid=dragSelfRectValid;dragSwapTraceSelfLeft=selfLeft;dragSwapTraceSelfRight=selfRight;
+            JsonObject detail;Put(detail,L"surface",std::wstring(dock?L"dock":L"toolbar"));Put(detail,L"x",static_cast<double>(x));Put(detail,L"dragPointer",static_cast<double>(dragPointer));Put(detail,L"dragGrab",static_cast<double>(dragGrab));Put(detail,L"dragWidth",static_cast<double>(dragWidth));Put(detail,L"center",static_cast<double>(cursorContent));Put(detail,L"cursorContent",static_cast<double>(cursorContent));Put(detail,L"best",static_cast<double>(best));Put(detail,L"currentDistance",static_cast<double>(currentDistance));Put(detail,L"dragTarget",dragTarget);Put(detail,L"target",target);Put(detail,L"slotCount",static_cast<double>(dragTargets.size()));detail.Insert(L"selfHit",JsonValue::CreateBooleanValue(selfHit));detail.Insert(L"selfRectValid",JsonValue::CreateBooleanValue(dragSelfRectValid));Put(detail,L"selfRectLeft",static_cast<double>(selfLeft));Put(detail,L"selfRectRight",static_cast<double>(selfRight));Put(detail,L"lastSwapCursor",static_cast<double>(lastSwapCursor));
+            JsonArray slots;for(size_t i=0;i<dragTargets.size()&&i<16;++i){JsonObject slot;Put(slot,L"id",dragTargets[i].first);Put(slot,L"slot",static_cast<double>(dragTargets[i].second));slots.Append(slot);}detail.Insert(L"slots",slots);
+            Put(detail,L"barScroll",static_cast<double>(barScroll));Put(detail,L"dragTargetScroll",static_cast<double>(dragTargetScroll));detail.Insert(L"tray",JsonValue::CreateBooleanValue(dragTray));detail.Insert(L"changed",JsonValue::CreateBooleanValue(changed));{JsonArray interval;interval.Append(JsonValue::CreateNumberValue(static_cast<double>(targetLeft)));interval.Append(JsonValue::CreateNumberValue(static_cast<double>(targetRight)));detail.Insert(L"targetInterval",interval);}detail.Insert(L"slotsRefreshed",JsonValue::CreateBooleanValue(slotsRefreshed));app.Telemetry(L"drag-swap",detail);
+        }
+    }
+
     if(!started&&!changed&&barScroll==oldScroll){
         size_t n=0;for(auto &row:rows)if(row.control==L"drag-ghost"&&n<dragRects.size()){
             auto original=dragRects[n++];float start=dragPointer-dragGrab+(Vertical()?original.top:original.left);if(Vertical()){row.rect.top=start;row.rect.bottom=start+original.bottom-original.top;}else{row.rect.left=start;row.rect.right=start+original.right-original.left;}
-            auto found=toolbarVisuals.find(L"@drag:"+row.id);if(found!=toolbarVisuals.end()&&found->second.group){float extra=dock?8.f:CompoundOwner(dragEntries[n-1]).empty()?0.f:2.f;found->second.group.Offset({(row.rect.left-extra)*dpi/96,(row.rect.top-extra)*dpi/96,0});}
+            float extra=dock?8.f:CompoundOwner(dragEntries[n-1]).empty()?0.f:2.f;
+            if(row.id==dragId)TraceDragGhost(x,start,original.left,extra);
+            auto found=toolbarVisuals.find(L"@drag:"+row.id);if(found!=toolbarVisuals.end()&&found->second.group)found->second.group.Offset({(row.rect.left-extra)*dpi/96,(row.rect.top-extra)*dpi/96,0});
         }return false;
     }
     Layout();return true;
@@ -1065,23 +1319,44 @@ inline void NativeBar::EndToolbarDrag(bool commit)
     // including the interval before/after Layout's narrower render scope.
     NativeRenderScope releasing(app.relay);
     JsonObject trace;Put(trace,L"stage",std::wstring(L"release"));Put(trace,L"surface",std::wstring(dock?L"dock":L"toolbar"));
-    trace.Insert(L"commit",JsonValue::CreateBooleanValue(commit));trace.Insert(L"changed",JsonValue::CreateBooleanValue(dragOrder!=dragOriginalOrder));app.Telemetry(L"bar-reorder",trace);
+    trace.Insert(L"commit",JsonValue::CreateBooleanValue(commit));trace.Insert(L"changed",JsonValue::CreateBooleanValue(dragTray?dragTrayOrder!=dragTrayOriginal:dragOrder!=dragOriginalOrder));app.Telemetry(L"bar-reorder",trace);
     KillTimer(hwnd,102);auto id=dragId;
     dropRows.clear();for(auto const &e:dragEntries){auto key=Str(e,L"visualId");if(key.empty())key=Str(e,L"id");if(key.empty())key=Str(e,L"key");dropRows.insert(key);}
     barDrag=false;bool motion=NativeMotion(app.model);dropId=motion?id:L"";dropUntil=motion?GetTickCount64()+250:0;if(motion)SetTimer(hwnd,97,260,nullptr);dragEntry=nullptr;dragId.clear();downId.clear();down=-1;
+    trayCollapseActive=false;
+    bool trayChanged=dragTray&&dragTrayOrder!=dragTrayOriginal;
     // Finish HWND bookkeeping before a model update can remove this monitor.
     if(dock&&hwnd){TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,hwnd,0};TrackMouseEvent(&track);POINT point{};if(GetCursorPos(&point))DockPointerLeft(!PtInRect(&full,point));}
     if(GetForegroundWindow()==hwnd&&IsWindow(previousFocus))SetForegroundWindow(previousFocus);
     // ReleaseCapture sends WM_CAPTURECHANGED synchronously. Paint its final order
     // only after committing, so the old slot never flashes back during release.
     HWND window=hwnd;bool captured=window&&GetCapture()==window;
-    if(commit&&dragOrder!=dragOriginalOrder)shell.ReorderToolbarSequence(*this,dragOrder);else {shell.provisionalOrder.clear();shell.provisionalOwner=nullptr;if(shell.authoritative)shell.Update(shell.authoritative);else {Layout();Draw();}}
+    if(commit&&trayChanged)shell.ReorderTraySequence(*this,dragTrayOrder,dragTraySection);
+    else if(commit&&dragOrder!=dragOriginalOrder)shell.ReorderToolbarSequence(*this,dragOrder);
+    else {shell.provisionalOrder.clear();shell.provisionalOwner=nullptr;shell.provisionalTray.clear();if(shell.authoritative)shell.Update(shell.authoritative);else {Layout();Draw();}}
+    dragTray=false;dragTrayOrder.clear();dragTrayOriginal.clear();
     if(captured&&GetCapture()==window)ReleaseCapture();
 }
 inline void NativeBar::PaintPreview70(ID2D1DeviceContext *c)
 {
     NativePaint p(c,app.graphics,dark);
-    float radius=dock?(Num(settings,L"margin")>0||Str(settings,L"mode")!=L"FullWidth"?16.f:0.f):Num(settings,L"margin")>0?height*.3f:0.f;if(dock)p.Material({0,0,width,height},NativeMaterial::Dock,Glass(),radius);else if(!TransparentToolbar())p.Material({0,0,width,height},NativeMaterial::Menu,Glass(),radius);
+    float radius=dock?(Num(settings,L"margin")>0||Str(settings,L"mode")!=L"FullWidth"?16.f:0.f):Num(settings,L"margin")>0?height*.3f:0.f;
+    if(dock)p.Material({0,0,width,height},NativeMaterial::Dock,Glass(),radius);
+    // Solid black rather than a dark glass tint: the point is to stop reading the
+    // application underneath, and any translucency brings its edges back.
+    else if(paintedBlackBar)p.Fill({0,0,width,height},D2D1::ColorF(0x000000),radius);
+    // "Keep transparent" under a window used to fall through to the menu material -
+    // TransparentToolbar() is false while covered - so the bar turned pale blue the
+    // moment a window went fullscreen. Nothing is painted now; the surface is cleared.
+    else if(paintedCoveredClear){}
+    // "Acrylic" is the blur, not the panel tint: the tint is what made it look exactly
+    // like the opaque bar. A thin scrim keeps the icons legible and lets the backdrop
+    // through; without a blur to sit on it would be unreadable, so fall back to a panel.
+    // A 12% veil on top of the blur was indistinguishable from painting nothing at all:
+    // the blur alone barely shows through a bar this thin. The veil is what makes the
+    // acrylic pick read as frosted glass next to the plain transparent one.
+    else if(paintedCoveredGlass&&toolbarGlass)p.Fill({0,0,width,height},D2D1::ColorF(dark?0x000000:0xFFFFFF,dark?.34f:.30f),radius);
+    else if(!TransparentToolbar())p.Material({0,0,width,height},paintedCoveredGlass?NativeMaterial::Panel:NativeMaterial::Menu,Glass(),radius);
     if(TransparentToolbar()&&Bool(app.model.preferences,L"transparentToolbarMask")){
         float tint=Bool(data,L"dark",Preview70Theme::systemDark)?1.f:0.f;
         D2D1_GRADIENT_STOP stops[]={{0,{tint,tint,tint,.22f}},{.35f,{tint,tint,tint,.16f}},{.7f,{tint,tint,tint,.06f}},{1,{tint,tint,tint,0}}};
@@ -1101,11 +1376,18 @@ inline void NativeBar::Draw()
     NativeRenderScope rendering(app.relay);if(!rendering){if(hwnd)InvalidateRect(hwnd,nullptr,FALSE);return;}
     if (gridSuppressed || !visible || edge || !hwnd)
         return;
-    paintedTransparentToolbar=TransparentToolbar();dark=paintedTransparentToolbar?!Bool(data,L"dark",Preview70Theme::systemDark):Bool(data,L"dark",Preview70Theme::systemDark);
+    // A bar painted out in black is light-on-dark regardless of the system theme; over
+    // the wallpaper the ink follows the theme, so the same row stays legible in both states.
+    paintedTransparentToolbar=TransparentToolbar();paintedBlackBar=BlackBar();
+    paintedCoveredClear=CoveredClear();paintedCoveredGlass=CoveredGlass();
+    dark=paintedBlackBar?true:Bool(data,L"dark",Preview70Theme::systemDark);
     if(dock&&dockBackdropDirty){if(materialVisual){materialVisual.Brush(nullptr);materialVisual.Comment(L"");}dockBackdropDirty=false;}
     if(dock)SyncNativeGlass(app.graphics,hwnd,toolbarRoot,materialVisual,{0,0,width,height},dpi/96,(Num(settings,L"margin")>0||Str(settings,L"mode")!=L"FullWidth"?16.f:0.f),NativeMaterial::Dock,!NativeLowPower(app.model),visual);
-    else SyncNativeGlass(app.graphics,hwnd,toolbarRoot,materialVisual,{0,0,width,height},dpi/96,Num(settings,L"margin")>0?height*.3f:0.f,NativeMaterial::Menu,!paintedTransparentToolbar&&!NativeLowPower(app.model),visual);
-    {SyncToolbarVisuals();auto key=std::to_wstring(width)+L":"+std::to_wstring(height)+L":"+std::to_wstring(dpi)+L":"+std::to_wstring(dark)+L":"+std::to_wstring(-1)+L":"+std::to_wstring(!downId.empty())+L":"+std::to_wstring(rows.empty())+L":"+std::to_wstring(Preview70Theme::revision)+L":"+std::to_wstring(Glass())+L":"+std::to_wstring(paintedTransparentToolbar)+L":"+std::to_wstring(Bool(app.model.preferences,L"transparentToolbarMask"));if(key==toolbarBackgroundKey&&surface){ApplyDockReflow();return;}toolbarBackgroundKey=key;}
+    else toolbarGlass=SyncNativeGlass(app.graphics,hwnd,toolbarRoot,materialVisual,{0,0,width,height},dpi/96,Num(settings,L"margin")>0?height*.3f:0.f,paintedCoveredGlass?NativeMaterial::Panel:NativeMaterial::Menu,!paintedTransparentToolbar&&!paintedBlackBar&&!paintedCoveredClear&&!NativeLowPower(app.model),visual);
+    if(!dock){std::wstring trace=paintedTransparentToolbar?L"bare":paintedBlackBar?L"black":paintedCoveredClear?L"clear":paintedCoveredGlass?(toolbarGlass?L"glass":L"panel"):L"material";
+        trace+=L":"+CoveredBackdrop()+L":"+std::to_wstring(toolbarGlass)+L":"+std::to_wstring(toolbarCoveredByApplication)+L":"+std::to_wstring(NativeGlassAvailable());
+        if(trace!=backdropTraceKey){backdropTraceKey=trace;JsonObject detail;Put(detail,L"branch",trace);Put(detail,L"backdrop",CoveredBackdrop());detail.Insert(L"covered",JsonValue::CreateBooleanValue(toolbarCoveredByApplication));detail.Insert(L"glass",JsonValue::CreateBooleanValue(toolbarGlass));detail.Insert(L"glassAvailable",JsonValue::CreateBooleanValue(NativeGlassAvailable()));Put(detail,L"reason",NativeGlassStates()[hwnd].reason);Put(detail,L"transparentToolbar",static_cast<double>(Bool(app.model.preferences,L"transparentToolbar")));app.Telemetry(L"toolbar-backdrop",detail);}}
+    {SyncToolbarVisuals();auto key=std::to_wstring(width)+L":"+std::to_wstring(height)+L":"+std::to_wstring(dpi)+L":"+std::to_wstring(dark)+L":"+std::to_wstring(-1)+L":"+std::to_wstring(!downId.empty())+L":"+std::to_wstring(rows.empty())+L":"+std::to_wstring(Preview70Theme::revision)+L":"+std::to_wstring(Glass())+L":"+std::to_wstring(paintedTransparentToolbar)+L":"+std::to_wstring(paintedBlackBar)+L":"+CoveredBackdrop()+L":"+std::to_wstring(Bool(app.model.preferences,L"transparentToolbarMask"))+L":"+std::to_wstring(paintedCoveredClear)+L":"+std::to_wstring(toolbarGlass);if(key==toolbarBackgroundKey&&surface){ApplyDockReflow();return;}toolbarBackgroundKey=key;}
     RECT rect{};
     GetClientRect(hwnd, &rect);
     int w = dock?static_cast<int>(std::ceil(width*dpi/96)):rect.right, h = dock?static_cast<int>(std::ceil(height*dpi/96)):rect.bottom;
@@ -1203,6 +1485,10 @@ inline void NativeBar::Activate(int index)
         if(shell.PreviewFor(*this,index))shell.HidePreview(this);else shell.ShowPreview(*this,index);
         return;
     }
+    if(!dock&&index>=0&&index<static_cast<int>(entries.size())){
+        auto module=Str(entries[index],L"nativeModule");
+        if(module==L"magic.focused-app"||module==L"magic.focused-title"){Menu(index,false);return;}
+    }
     if(!dock&&index>=0&&index<static_cast<int>(entries.size())&&Bool(entries[index],L"passive"))return;
     if(dock)shell.HidePreview(this);
     Send(index);
@@ -1239,6 +1525,13 @@ inline void NativeBar::Menu(int index,bool refresh)
         JsonObject row;auto id=L"bar-menu-"+std::to_wstring(++next);
         Put(row,L"id",id);Put(row,L"label",label);Put(row,L"control",control);Put(row,L"detail",detail);
         row.Insert(L"enabled",JsonValue::CreateBooleanValue(true));parent.Append(row);
+        // Picking a mark, a wordmark or a layout is a run of small tries, not one
+        // decision, so those rows keep the menu standing. Typing custom text is the
+        // exception: it leaves the menu for a dialog.
+        if(verb==L"set-brand-icon"||verb==L"set-brand-style"||verb==L"set-brand-device"||
+           verb==L"set-brand-icon-hide"||verb==L"set-menu-layout"||verb==L"set-focused-separator"||verb==L"set-toolbar-drag-button-only"||
+           (verb==L"set-brand-label"&&destination!=L"custom"))
+            row.Insert(L"keepOpen",JsonValue::CreateBooleanValue(true));
         actions[id]={verb,destination,local?index:-1};menuIcons[id]=detail;return row;
     };
     auto separator=[&](JsonArray const &parent){JsonObject row;Put(row,L"control",std::wstring(L"separator"));parent.Append(row);};
@@ -1268,7 +1561,149 @@ inline void NativeBar::Menu(int index,bool refresh)
         if(Str(item,L"plugin")==L"@default/weg-trash-bin"){add(values,BarText(L"trash_bin.empty_bin"),L"empty-bin",L"",true,L"",L"FaRegTrashAlt");separator(values);}
         if(Str(item,L"type")==L"Plugin"&&(Str(item,L"plugin")==L"@default/weg-start-menu"||Str(item,L"plugin")==L"@default/weg-show-desktop"||Str(item,L"plugin")==L"@default/weg-trash-bin")){add(values,BarText(L"context_menu.edit_icon"),L"edit-custom-icon",L"",true,L"",L"RiEditBoxLine");separator(values);}
         add(values,BarText(Str(item,L"type")==L"Separator"?L"context_menu.remove_separator":L"context_menu.remove_module"),L"remove",L"",true,L"",L"CgExtensionRemove");
-    }else if(valid&&!dock){add(values,BarText(L"context_menu.remove"),L"remove",L"",true,L"",L"CgExtensionRemove");
+    }else if(valid&&!dock&&(Str(item,L"nativeModule")==L"magic.focused-app"||Str(item,L"nativeModule")==L"magic.focused-title")){
+        // The adapter has nothing to run for these rows, which used to surface as a
+        // "not finished" card. What the row does own is the mark in front of the name,
+        // so the click opens that choice instead.
+        JsonArray separators;auto choice=Str(app.model.preferences,L"focusedSeparator");if(choice.empty())choice=L"desktop";
+        struct SeparatorOption{wchar_t const *verb,*zh,*en;};
+        SeparatorOption options[]={{L"desktop",L"笔记本图案",L"Laptop mark"},{L"bar",L"竖杠",L"Bar"},{L"none",L"不显示",L"None"}};
+        for(auto const &option:options){
+            auto row=add(separators,Ui(option.zh,option.en),L"set-focused-separator",option.verb,true,L"",L"");
+            row.Insert(L"checked",JsonValue::CreateBooleanValue(choice==option.verb));
+        }
+        auto separatorMenu=add(values,Ui(L"分隔符",L"Separator"),L"",L"",false,L"submenu",L"");
+        separatorMenu.Insert(L"children",separators);
+        separator(values);
+        add(values,BarText(L"context_menu.remove"),L"remove",L"",true,L"",L"CgExtensionRemove");
+    }else if(valid&&!dock&&Str(item,L"nativeModule")!=L"magic.user"){
+        // Every other toolbar row is a plain module: no mark to swap, no wordmark to
+        // edit, no device shape to pick. Removal is the whole menu. The system tray
+        // block is the one exception: its whole-block drag can fold its icons, so the
+        // switch for that lives here, on the button that starts the gesture.
+        if(Str(item,L"nativeModule")==L"magic.tray"){
+            bool animation=Bool(app.model.preferences,L"toolbarDragButtonOnly",true);
+            auto row=add(values,Ui(L"拖拽仅显示按钮",L"Show button only while dragging"),L"set-toolbar-drag-button-only",animation?L"off":L"on",true,L"",L"");
+            row.Insert(L"checked",JsonValue::CreateBooleanValue(animation));
+            row.Insert(L"toggle",JsonValue::CreateBooleanValue(true));
+        }
+        add(values,BarText(L"context_menu.remove"),L"remove",L"",true,L"",L"CgExtensionRemove");
+    }else if(valid&&!dock){
+        // Only the brand cell (magic.user) is a lockup of mark plus wordmark, so every
+        // editor below is keyed to it: the brand list, the device shape, the wordmark
+        // mode and the hide switch mean nothing on a CPU gauge or a clock.
+        // Bar items carry user images too, not just dock pins.
+        add(values,Ui(L"导入自定义图标",L"Import custom icon"),L"edit-custom-icon",L"",true,L"",L"RiEditBoxLine");
+        {
+            // Two sources for the mark, one per branch of the menu: the bundled
+            // device shapes, and the vendor marks grouped by initial.
+            struct BrandEntry{std::wstring slug,label;bool color=false;};
+            std::vector<BrandEntry> entries;
+            for(auto const &asset:BrandSvgAssets){
+                std::wstring name(asset.name);
+                auto first=name.find(L':'),second=name.find(L':',first+1);
+                if(first==std::wstring::npos||second==std::wstring::npos)continue;
+                auto slug=name.substr(first+1,second-first-1),style=name.substr(second+1);
+                auto found=std::find_if(entries.begin(),entries.end(),[&](BrandEntry const &e){return e.slug==slug;});
+                if(found==entries.end()){entries.push_back({slug,std::wstring(asset.label),false});found=entries.end()-1;}
+                if(style==L"color")found->color=true;
+            }
+            // The baked table follows the fetch order, so sort before grouping; a
+            // repeated letter heading is the tell that this is missing.
+            // Group and order by the slug, never by the label: a vendor whose display
+            // name is Chinese (机械革命) belongs under its Latin initial (M), not under
+            // a one-off heading made of its first character.
+            std::stable_sort(entries.begin(),entries.end(),[](BrandEntry const &a,BrandEntry const &b){
+                return CompareStringEx(LOCALE_NAME_INVARIANT,0,a.slug.c_str(),static_cast<int>(a.slug.size()),b.slug.c_str(),static_cast<int>(b.slug.size()),nullptr,nullptr,0)==CSTR_LESS_THAN;});
+            JsonArray brands;std::wstring letter;
+            bool color=Str(item,L"brandStyle")==L"color",chosen=!Str(item,L"brandIcon").empty();
+            std::wstring device=Str(item,L"brandDevice");
+            // How the menu itself is laid out belongs next to the list it distorts: 39
+            // vendors grouped by initial is the case that runs past one column, and the
+            // mark picker is where the reader notices it.
+            {
+                bool columns=Str(app.model.preferences,L"contextMenuLayout")==L"columns";
+                JsonArray layouts;
+                auto scroll=add(layouts,Ui(L"竖列滚动",L"Single column"),L"set-menu-layout",L"scroll",true,L"",L"");
+                scroll.Insert(L"checked",JsonValue::CreateBooleanValue(!columns));
+                auto grid=add(layouts,Ui(L"多列平铺",L"Columns"),L"set-menu-layout",L"columns",true,L"",L"");
+                grid.Insert(L"checked",JsonValue::CreateBooleanValue(columns));
+                auto layout=add(brands,Ui(L"菜单布局",L"Menu layout"),L"",L"",false,L"submenu",L"");
+                layout.Insert(L"children",layouts);
+                separator(brands);
+            }
+            // Colour lockup versus single-path glyph is a property of the whole cell, not
+            // of one vendor, so it sits above the list instead of tripling it. It stays
+            // visible without a vendor chosen: hiding it is what made the row look lost.
+            auto style=add(brands,color?Ui(L"改用单色图形",L"Switch to glyph"):Ui(L"改用彩色徽标",L"Switch to colour"),
+                L"set-brand-style",color?L"mono":L"color",true,L"",L"");
+            // The switch shares its level with the vendor radio list, so it must not
+            // take part in that group: picking it leaves the chosen vendor ticked.
+            style.Insert(L"checked",JsonValue::CreateBooleanValue(color));
+            style.Insert(L"toggle",JsonValue::CreateBooleanValue(true));
+            style.Insert(L"independent",JsonValue::CreateBooleanValue(true));
+            separator(brands);
+            for(auto const &entry:entries){
+                auto label=entry.label.empty()?entry.slug:entry.label;
+                auto initial=std::wstring(1,static_cast<wchar_t>(towupper(entry.slug.empty()?L'#':entry.slug[0])));
+                if(initial!=letter){
+                    letter=initial;
+                    // A drawn band, not a bare caption: the eye needs a hard marker to
+                    // find the first letter it wants in a 36-row list.
+                    auto heading=add(brands,letter,L"",L"",false,L"group");
+                    heading.Insert(L"enabled",JsonValue::CreateBooleanValue(false));
+                }
+                auto row=add(brands,label,L"set-brand-icon",entry.slug,true,L"",L"");
+                // Every alternative states its state, so the tick can move when the
+                // choice changes instead of only ever appearing once.
+                row.Insert(L"checked",JsonValue::CreateBooleanValue(Str(item,L"brandIcon")==entry.slug));
+            }
+            JsonArray icons;
+            if(brands.Size()){
+                auto preset=add(icons,Ui(L"预设品牌",L"Preset brands"),L"",L"",false,L"submenu",L"");
+                preset.Insert(L"children",brands);
+            }
+            {
+                // The default branch is a family, not one glyph: laptop or desktop.
+                JsonArray defaults;
+                struct DeviceOption{wchar_t const *verb,*zh,*en;};
+                DeviceOption devices[]={{L"laptop",L"笔记本",L"Laptop"},{L"desktop",L"台式电脑",L"Desktop"}};
+                for(auto const &option:devices){
+                    auto row=add(defaults,Ui(option.zh,option.en),L"set-brand-device",option.verb,true,L"",L"");
+                    bool desktop=std::wstring(option.verb)==L"desktop";
+                    row.Insert(L"checked",JsonValue::CreateBooleanValue(!chosen&&(device==L"desktop")==desktop));
+                }
+                auto plain=add(icons,Ui(L"默认图标",L"Default icon"),L"",L"",false,L"submenu",L"");
+                plain.Insert(L"children",defaults);
+            }
+            if(icons.Size()){
+                auto iconMenu=add(values,Ui(L"图标",L"Mark"),L"",L"",false,L"submenu",L"");
+                iconMenu.Insert(L"children",icons);
+            }
+        }
+        {
+            // The wordmark is its own component, independent of the mark.
+            JsonArray labels;auto mode=Str(item,L"brandLabel");if(mode.empty())mode=L"brand";
+            struct LabelOption{wchar_t const *verb,*zh,*en;};
+            LabelOption options[]={{L"brand",L"品牌名",L"Vendor name"},{L"host",L"主机名",L"PC name"},
+                                   {L"none",L"不显示字标",L"No wordmark"}};
+            for(auto const &option:options){
+                auto row=add(labels,Ui(option.zh,option.en),L"set-brand-label",option.verb,true,L"",L"");
+                row.Insert(L"checked",JsonValue::CreateBooleanValue(mode==option.verb));
+            }
+            auto custom=add(labels,Ui(L"自定义文字…",L"Custom text…"),L"set-brand-label",std::wstring(L"custom"),true,L"",L"");
+            custom.Insert(L"checked",JsonValue::CreateBooleanValue(mode==L"custom"));
+            auto labelMenu=add(values,Ui(L"字标",L"Wordmark"),L"",L"",false,L"submenu",L"");
+            labelMenu.Insert(L"children",labels);
+        }
+        {
+            bool hidden=Str(item,L"brandIconHide")==L"1";
+            add(values,hidden?Ui(L"显示图标",L"Show mark"):Ui(L"隐藏图标",L"Hide mark"),
+                L"set-brand-icon-hide",hidden?L"0":L"1",true,L"",hidden?L"Select":L"Cancel");
+        }
+        if(Bool(item,L"customIcon")||!Str(item,L"icon").empty()||!Str(item,L"brandIcon").empty()||Str(item,L"brandDevice")==L"desktop")add(values,Ui(L"恢复默认图标",L"Reset icon"),L"reset-icon",L"",true,L"",L"TbRestore");
+        separator(values);
+        add(values,BarText(L"context_menu.remove"),L"remove",L"",true,L"",L"CgExtensionRemove");
     }else{
         JsonArray modules;
         if(!dock){add(modules,BarText(L"context_menu.restore"),L"restore",L"",false,L"",L"TbRestore");separator(modules);}
@@ -1301,9 +1736,13 @@ inline void NativeBar::Menu(int index,bool refresh)
     HideBarTooltip();KillTimer(hwnd,94);shell.HidePreview(this);
     POINT point{};GetCursorPos(&point);auto state=life;auto &menus=Menus(app);
     auto itemKey=valid?rows[index].id:L"";
-    auto choose=[state,actions,itemKey](size_t,std::wstring const &id){
+    auto choose=[state,actions,itemKey](size_t depth,std::wstring const &id){
         if(!state->owner||!actions.contains(id))return;
-        auto &bar=*static_cast<NativeBar*>(state->owner);auto action=actions.at(id);Menus(bar.app).Close(false);bar.menuOpen=false;
+        auto &bar=*static_cast<NativeBar*>(state->owner);auto action=actions.at(id);
+        // A row that carries keepOpen is one step in a run: the menu stays up so the
+        // next step is one click away, and the bar is not asked to hide underneath it.
+        bool persistent=Menus(bar.app).Persistent(depth,id);
+        if(!persistent){Menus(bar.app).Close(false);bar.menuOpen=false;}
         if(action.item>=0){
             auto found=std::find_if(bar.rows.begin(),bar.rows.end(),[&](auto const &row){return row.id==itemKey;});
             if(found==bar.rows.end()){bar.ScheduleHide();return;}
@@ -1311,7 +1750,7 @@ inline void NativeBar::Menu(int index,bool refresh)
         }
         if(action.verb==L"focus")bar.Send(action.item,action.verb,_wcstoi64(action.destination.c_str(),nullptr,10));
         else bar.SendBar(action.verb,action.destination,action.item);
-        bar.ScheduleHide();
+        if(!persistent)bar.ScheduleHide();
     };
     if(refresh)menus.choose=choose;
     else menus.Begin(point,L"toolbar",choose,[state](){if(state->owner){auto bar=static_cast<NativeBar*>(state->owner);bar->menuOpen=false;bar->menuItemKey.clear();bar->ScheduleHide();}});
@@ -1333,6 +1772,8 @@ inline void NativeBar::Menu(int index,bool refresh)
         else {menus.origin.y=full.top;menus.rootAlignY=L"End";}
     }
     if(app.popup)app.popup->Hide();menuOpen=true;if(refresh)menus.ReplaceRoot(values);else menus.Show(0,values);
+    // Stamped last: a rebuild that throws must not claim the data it failed to show.
+    menus.itemKey=itemKey;menus.itemBar=hwnd;menus.itemStamp=MenuStamp(item);
 }
 inline void NativeBar::ShowBarTooltip(){
     if(edge||!visible||barDrag||menuOpen||focus<0||focus>=static_cast<int>(entries.size()))return;
@@ -1589,7 +2030,7 @@ inline LRESULT NativeBar::HandleMessage(HWND window,UINT message,WPARAM w,LPARAM
             if(w==DockPreviewTimer){KillTimer(window,DockPreviewTimer);if(self->menuOpen){if(self->shell.PreviewHasCursor())SetTimer(window,DockPreviewTimer,200,nullptr);else self->shell.HidePreview(self);}return 0;}
             if(w==DockBodyTimer){KillTimer(window,DockBodyTimer);self->ResetDockBodyMotion();if(!self->edge)self->PositionBar(SWP_NOACTIVATE);return 0;}
             if(w==103){KillTimer(window,103);self->SyncDockHover();return 0;}
-            if(w==102){KillTimer(window,102);if(self->barDrag)self->shell.PreviewToolbarOrder(*self,self->dragOrder);return 0;}
+            if(w==102){KillTimer(window,102);if(self->barDrag)self->shell.PreviewToolbarOrder(*self,self->dragOrder,self->dragTray?&self->dragTrayOrder:nullptr);return 0;}
             if(w==100){KillTimer(window,100);self->ShowBarTooltip();return 0;}
             if(w==98){KillTimer(window,98);
                 if(self->dock&&self->pointerKind==PT_MOUSE&&!self->pointerCancelled&&!self->downId.empty()&&GetCapture()==window&&(GetAsyncKeyState(VK_LBUTTON)&0x8000)){
@@ -1640,7 +2081,7 @@ inline LRESULT NativeBar::HandleMessage(HWND window,UINT message,WPARAM w,LPARAM
                 KillTimer(window, 91);
                 ShowWindow(window, SW_HIDE);
                 self->visible = false;
-                self->HideBarTooltip();if(self->barDrag){self->barDrag=false;self->downId.clear();self->dragId.clear();self->shell.provisionalOrder.clear();self->shell.provisionalOwner=nullptr;if(GetCapture()==window)ReleaseCapture();}self->Release();
+                self->HideBarTooltip();if(self->barDrag){self->barDrag=false;self->downId.clear();self->dragId.clear();self->dragTray=false;self->dragTrayOrder.clear();self->dragTrayOriginal.clear();self->shell.provisionalOrder.clear();self->shell.provisionalOwner=nullptr;self->shell.provisionalTray.clear();if(GetCapture()==window)ReleaseCapture();}self->Release();
             }
             else if (w == WTS_SESSION_UNLOCK)
             {

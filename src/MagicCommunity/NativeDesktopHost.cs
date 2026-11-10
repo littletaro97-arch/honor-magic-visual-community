@@ -42,12 +42,15 @@ public static class NativeDesktopHost
         SetWindowLongPtr(hwnd,-20,new IntPtr((extended&~0x08040108L)|0x00000080L));
         SetWindowLongPtr(hwnd,-8,owner);
         if(GetParent(hwnd)!=owner)throw new Win32Exception(Marshal.GetLastWin32Error(),"挂接原生桌面所有者失败。");
-        var point=new NativeDesktop.Point{X=display.X,Y=display.Y};
+        // P0: the desktop host covers the whole monitor (rcMonitor), not the work
+        // area. Using rcWork here shifted the entire desktop by the taskbar
+        // thickness whenever the taskbar docked top/left/right.
+        var point=new NativeDesktop.Point{X=display.DesktopLeft,Y=display.DesktopTop};
         // The host runtime can cache visibility even when the recovery guard hides the HWND.
         // Final readiness therefore sets OS visibility without activating the desktop.
         // Lower the owned group together. SWP_NOOWNERZORDER would strand this
         // surface below Explorer: the next click then hits the native desktop.
-        if(!SetWindowPos(hwnd,new IntPtr(1),point.X,point.Y,display.Width,display.Height,0x10|0x20|(show?0x40u:0u)))throw new Win32Exception();
+        if(!SetWindowPos(hwnd,new IntPtr(1),point.X,point.Y,display.DesktopWidth,display.DesktopHeight,0x10|0x20|(show?0x40u:0u)))throw new Win32Exception();
         if(show&&!IsWindowVisible(hwnd))throw new InvalidOperationException("桌面窗口显示失败，保留 Windows 原图标。");
         return owner.ToInt64();
     }

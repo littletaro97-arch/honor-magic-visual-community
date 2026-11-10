@@ -20,7 +20,7 @@ inline void NativePopup::LayoutPreview70()
         imageSources[key]=source;auto png=Str(row,L"iconPng");
         if(!png.empty()){if(!appearanceIcons.values.contains(key))appearanceIcons.Load(app.graphics,key,png);row.Remove(L"iconPng");}
     }
-    appearanceOverflow=appearanceTop=appearanceView=appearanceOffset=0;
+    appearanceOverflow=appearanceTop=appearanceView=appearanceOffset=userMenuBottom=0;
     float left=18,right=width-18,y=58;
     auto set=[&](PopupRow &r,D2D1_RECT_F b){r.rect=b;r.offscreen=false;};
     if(FunctionalPanel()){LayoutFunctionalPanel();}
@@ -43,9 +43,41 @@ inline void NativePopup::LayoutPreview70()
             else if(r.key==L"settings")set(r,{86,height-52,width-18,height-20});
         }
     }else if(kind==L"@magic/user-menu"){
-        y=106;
-        for(auto &r:rows){if(r.key==L"sleep"||r.key==L"update"||r.key==L"exit")y+=9;
-            set(r,{left,y,right,y+34});y+=36;}
+        // Row height and the gap between rows belong to the reader: the card is read
+        // at a glance and some people need it airier than the vendor shipped it.
+        double wantedRow=Num(app.model.preferences,L"accountCardRowHeight");
+        double wantedGap=Num(app.model.preferences,L"accountCardGap");
+        float rowHeight=(wantedRow>=28&&wantedRow<=52)?static_cast<float>(wantedRow):38.f;
+        float rowGap=(wantedGap>=0&&wantedGap<=16)?static_cast<float>(wantedGap):0.f;
+        y=76;
+        for(auto &r:rows){
+            if(r.control==L"label"){set(r,{left+10,y+5,right-10,y+6});y+=13+rowGap;continue;}
+            set(r,{left,y,right,y+rowHeight});y+=rowHeight+rowGap;
+        }
+        // The height contract reads this before it settles the card size: the label
+        // rows advance the flow, so their 13 DIP plus gap is part of the content.
+        userMenuBottom=rows.empty()?76.f:rows.back().rect.bottom;
+        // Past the work-area ceiling the card scrolls instead of compressing rows the
+        // reader chose. The bound is the real content, not a visibleRows window: these
+        // rows are 30-52 DIP tall, so a fixed 56 DIP count would strand the tail.
+        float viewportBottom=height-18,origin=rows.empty()?76.f:rows.front().rect.top;
+        int maximum=0;
+        if(userMenuBottom>viewportBottom+.5f)
+            for(int k=1;k<static_cast<int>(rows.size());++k){
+                maximum=k;
+                if(userMenuBottom-(rows[k].rect.top-origin)<=viewportBottom+.5f)break;
+            }
+        scroll=std::clamp(scroll,0,maximum);
+        // One offset for both the paint and the hit test, and rows outside the card's
+        // content window are marked here rather than left to the generic row window.
+        float offset=scroll>0&&scroll<static_cast<int>(rows.size())?rows[scroll].rect.top-origin:0.f;
+        // The generic thumb painter reads these four fields. The card feeds them from
+        // its real content, so overflow shows without hovering a row.
+        appearanceTop=origin;
+        appearanceView=std::max(1.f,viewportBottom-origin);
+        appearanceOffset=offset;
+        appearanceOverflow=std::max(0.f,userMenuBottom-viewportBottom);
+        for(auto &r:rows){if(offset){r.rect.top-=offset;r.rect.bottom-=offset;}r.offscreen=r.rect.bottom<=origin||r.rect.top>=height-16;}
     }else if(!generic){
         y=54;for(auto &r:rows){if(r.key==L"settings")set(r,{left,height-52,right,height-20});
             else {set(r,{left,y,right,y+54});y+=58;}}
@@ -140,16 +172,17 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
     if(LocalContext()){PaintContext(c);return;}
     if(LocalPicker()){PaintPicker(c);return;}
     NativePaint p(c,app.graphics,dark);auto &t=p.theme;
-    D2D1_RECT_F outer{NativeMetrics::PopupInset,NativeMetrics::PopupInset,width-NativeMetrics::PopupInset,height-NativeMetrics::PopupInset};if(!resizePainting){if(!NativeLowPower(app.model))p.Shadow(outer);p.Material(outer,MaterialTier(),Glass(),NativeMetrics::FloatingRadius,kind==L"@magic/system-tray"||kind==L"@magic/apps-menu");}
+    D2D1_RECT_F outer{NativeMetrics::PopupInset,NativeMetrics::PopupInset,width-NativeMetrics::PopupInset,height-NativeMetrics::PopupInset};if(!resizePainting){if(!NativeLowPower(app.model))p.Shadow(outer,MaterialRadius(),NativeMetrics::PopupInset);p.Material(outer,MaterialTier(),Glass(),MaterialRadius(),kind==L"@magic/system-tray"||kind==L"@magic/apps-menu");}
     bool calendar=kind==L"@magic/calendar-popup",user=kind==L"@magic/user-menu",apps=kind==L"@magic/apps-menu";
     if(apps)p.Text(Ui(L"应用",L"Apps"),{22,10,width-120,44},15,t.MaterialMuted(),400);
     if(user){
-        p.Text(Ui(L"用户",L"USER"),{26,19,width-26,37},11.5f,t.Gray(700),600);
-        c->FillEllipse({{48,68},22,22},p.Color(t.Accent()));auto name=Str(Account(),L"name");
-        p.Text(name.empty()?L"?":name.substr(0,1),{26,46,70,90},17,t.OnAccent(),600,DWRITE_TEXT_ALIGNMENT_CENTER);
-        p.Text(name,{82,48,width-26,68},13.76f,t.Ink(),600);
-        p.Text(Bool(Account(),L"honorSignedIn")?Ui(L"荣耀账号已登录",L"HONOR account signed in"):Ui(L"荣耀账号未登录",L"HONOR account signed out"),
-               {82,70,width-26,88},11.5f,t.MaterialMuted());
+        // Brand header, same shape as the brand menu: machine brand on top,
+        // product and version below, hairline before the first group.
+        p.Text(NativeBrandName(),{26,14,width-26,38},15,t.Ink(),600);
+        auto version=Str(Account(),L"version");
+        std::wstring subtitle=version.empty()?std::wstring(L"Magic 视界社区版"):std::wstring(L"Magic 视界社区版 ")+version;
+        p.Text(subtitle,{26,38,width-26,56},11,t.MaterialMuted());
+        p.Line(22,64,width-22,64,t.Gray(900,.10f));
     }else if(kind==L"@magic/power-menu"){
         c->FillEllipse({{48,50},24,24},p.Color(t.Accent()));p.Icon(L"user",{34,36,62,64},t.OnAccent());
         p.Text(Ui(L"再见，",L"Goodbye, ")+Str(Account(),L"name"),{88,28,width-24,52},14,t.Ink(),600);
@@ -174,11 +207,12 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
     }
     bool secondary=kind==L"@magic/network-popup"||kind==L"@magic/bluetooth-popup"||kind==L"@magic/media-popup";
     if(secondary)for(auto const &r:rows)if(r.control==L"toggle"&&r.rect.top==22)p.Toggle(r.rect,r.value>.5,r.enabled);
-    float clipTop=apps?18:calendar||user?10:ContentTop();
+    float clipTop=apps?18:calendar?10:ContentTop();
     c->PushAxisAlignedClip({14,clipTop,width-14,height-16},D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     if(apps)p.Fill({18,height-58,width-18,height-16},t.SectionFilm(),NativeMetrics::PanelRadius);
     for(int i=0;i<static_cast<int>(rows.size());i++){
         auto const &r=rows[i];if(r.offscreen||PowerView()&&r.id==L"power-refresh"||secondary&&r.control==L"toggle"&&r.rect.top==22)continue;auto rect=r.rect;
+        if(kind==L"@magic/user-menu"&&r.control==L"label"){p.Line(rect.left+10,(rect.top+rect.bottom)/2,rect.right-10,(rect.top+rect.bottom)/2,t.Gray(900,.10f));continue;}
         bool active=r.active||r.control==L"toggle"&&r.value>.5;
         bool grid=calendar,quick=kind==L"@magic/quick-settings"&&!PowerView()&&r.control==L"toggle";
         bool tile=apps&&r.id.rfind(L"app:",0)==0||kind==L"@magic/system-tray"||kind==L"@magic/power-menu";
@@ -191,7 +225,7 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
         if(kind!=L"@magic/system-tray")p.Interaction(InteractionRegion(i),r.active&&!grid&&!quick,materialPreview&&i==hover,i==focus&&!grid);
         // Calendar date and toggle state colors remain functional accents.
         if(r.active&&grid)p.Fill(rect,t.Accent(),NativeMetrics::ControlRadius);
-        auto ink=user&&r.key==L"exit"?t.Danger():!r.enabled&&r.control!=L"label"&&!card?t.Gray(400):active&&grid?t.OnAccent():t.Ink();
+        auto ink=user&&(r.key==L"exit"||r.key==L"shutdown")?t.Danger():!r.enabled&&r.control!=L"label"&&!card?t.Gray(400):active&&grid?t.OnAccent():t.Ink();
         std::wstring label=r.label;
         int confirmation=armed==r.action?ConfirmationSeconds():0;
         if(confirmation){ink=t.Danger();if(kind==L"@magic/power-menu")label=Ui(L"再次确认 ",L"Confirm ")+std::to_wstring(confirmation);}
@@ -266,25 +300,51 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
             if(r.control==L"toggle")p.Toggle({rect.right-46,cy-10,rect.right-6,cy+10},r.value>.5,r.enabled);
         }else{
             float inset=user||kind==L"@magic/keyboard-selector"||kind==L"@magic/task-switcher"?36:10;
+            // The row font is one of the card's visual parameters, not a constant.
+            float rowFont=12.8f;
+            if(user){double wanted=Num(app.model.preferences,L"accountCardFontSize");if(wanted>=11&&wanted<=16)rowFont=static_cast<float>(wanted);}
             if(kind==L"@magic/task-switcher")appearanceIcons.Draw(c,r.id,{rect.left+6,rect.top+14,rect.left+30,rect.top+38});
-            if(user){p.Icon(r.key,{rect.left+8,rect.top+9,rect.left+24,rect.top+25},ink);
-                if(r.key==L"sleep"||r.key==L"update"||r.key==L"exit")p.Line(rect.left,rect.top-5,rect.right,rect.top-5,t.Gray(900,.1f));}
+            if(user)p.Icon(r.key,{rect.left+8,rect.top+11,rect.left+24,rect.top+27},ink);
             bool keyboard=kind==L"@magic/keyboard-selector";float keyboardCenter=r.detail.empty()?(rect.top+rect.bottom)/2:rect.top+15;
             if(keyboard)p.Icon(L"keyboard",{rect.left+8,keyboardCenter-9,rect.left+26,keyboardCenter+9},t.Gray(700));
             bool confirm=armed==r.action||r.id==L"confirm-yes";
-            if(confirm||user&&r.key==L"exit")ink=t.Danger();
+            if(confirm||user&&(r.key==L"exit"||r.key==L"shutdown"))ink=t.Danger();
             float headerBottom=r.detail.empty()?rect.bottom:rect.top+27;
             auto hint=ConfirmationBounds(r);
             float labelRight=confirmation?hint.left-8:rect.right-(r.id.rfind(L"notification:",0)==0?36:10);
-            p.Text(label,{rect.left+inset,keyboard?rect.top:rect.top+3,labelRight,headerBottom},12.8f,ink,card||r.active?600:400);
+            p.Text(label,{rect.left+inset,keyboard?rect.top:rect.top+3,labelRight,headerBottom},rowFont,ink,card||r.active?600:400);
             if(confirmation)p.Text(Ui(L"再次点击确认 · ",L"Click again · ")+std::to_wstring(confirmation),hint,11,t.Danger(),400,DWRITE_TEXT_ALIGNMENT_TRAILING);
-            if(!r.detail.empty())p.Text(r.detail,{rect.left+inset,rect.top+27,rect.right-10,rect.bottom-5},12,t.Gray(700),400,DWRITE_TEXT_ALIGNMENT_LEADING,0,true);
+            if(!r.detail.empty()&&!user)p.Text(r.detail,{rect.left+inset,rect.top+27,rect.right-10,rect.bottom-5},12,t.Gray(700),400,DWRITE_TEXT_ALIGNMENT_LEADING,0,true);
+            if(!r.detail.empty()&&user){
+                // This shared painter reserved rect.top+27..rect.bottom-5 for the second
+                // line, which is 6 DIP in a 38 DIP card row but 14.2 DIP of text: the
+                // paragraph was centred in a box shorter than its own line, and CLIP cut
+                // the caps and the baseline. The row is not too short - 17 DIP sit below
+                // the label ink - so the subtitle takes that band, and shrinks only when
+                // the reader picked a row that cannot hold a readable line at all.
+                // HONOR Sans CN: ascent .968, ink top .846, ink bottom -.085 em.
+                float labelInkBottom=rect.top+3+(24-1.185f*rowFont)*.5f+1.053f*rowFont;
+                float room=rect.bottom-1-(labelInkBottom+1);
+                float detailSize=std::min(12.f,room/.931f);
+                if(detailSize>=8){
+                    auto format=p.graphics.Format(detailSize,false,400);
+                    auto wrapping=format->GetWordWrapping();format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    com_ptr<IDWriteTextLayout> layout;
+                    if(SUCCEEDED(p.graphics.text->CreateTextLayout(r.detail.c_str(),static_cast<UINT32>(r.detail.size()),format,std::max(1.f,rect.right-10-(rect.left+inset)),1.6f*detailSize,layout.put()))){
+                        DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER,0,0};com_ptr<IDWriteInlineObject> ellipsis;
+                        if(SUCCEEDED(p.graphics.text->CreateEllipsisTrimmingSign(format,ellipsis.put())))layout->SetTrimming(&trim,ellipsis.get());
+                        float inkTop=labelInkBottom+1+(room-.931f*detailSize)*.5f;
+                        p.c->DrawTextLayout({rect.left+inset,inkTop-.122f*detailSize},layout.get(),p.Color(t.Gray(700)),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    }
+                    format->SetWordWrapping(wrapping);
+                }
+            }
             if(r.control==L"toggle")p.Toggle({rect.right-48,rect.top+8,rect.right-8,rect.top+28},r.value>.5,r.enabled);
         }
     }
     if(apps){c->FillEllipse({{36,height-36},12,12},p.Color(t.Accent()));p.Text(Str(Account(),L"name"),{58,height-52,150,height-20},12.8f,t.Ink(),600);}
     if(rows.empty())p.Text(Ui(L"暂无内容",L"Nothing here yet"),{18,58,width-18,height-18},12,t.MaterialMuted(),400,DWRITE_TEXT_ALIGNMENT_CENTER);
-    if(generic&&hover>=0&&appearanceOverflow>.5f){
+    if(generic&&(hover>=0||kind==L"@magic/user-menu")&&appearanceOverflow>.5f){
         float thumb=std::max(24.f,appearanceView*appearanceView/(appearanceView+appearanceOverflow));
         float y=appearanceTop+(appearanceView-thumb)*std::clamp(appearanceOffset/appearanceOverflow,0.f,1.f);
         auto ink=t.Ink();ink.a=.25f;p.Fill({width-16,y,width-13,y+thumb},ink,1.5f);

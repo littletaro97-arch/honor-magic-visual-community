@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace MagicCommunity;
 public sealed class AppController
 {
-    public const string Version = "0.4.9";
+    public const string Version = "0.4.10.32";
     public bool DesktopActive { get; set; }
     public string PowerMode { get; internal set; }="暂不可用";
     public string Root { get; }
@@ -18,6 +18,25 @@ public sealed class AppController
     public string Status { get; private set; } = "正在读取桌面…";
     internal ShortcutPreferences KeyboardPreferences {get;set;}=new();
     internal Func<ShortcutPreferences,Task>? ApplyKeyboardPreferences {get;set;}
+    // The settings window owns no renderer pipe. The native session lends it the same
+    // module catalog and the same toggle the bar's own right-click menu uses, so the
+    // two entry points always edit one configuration instead of drifting apart.
+    internal Func<CancellationToken,Task<IReadOnlyList<BarModuleState>>>? ReadBarModules {get;set;}
+    internal Func<string,string,bool,CancellationToken,Task>? SetBarModule {get;set;}
+    // Preferences are read by the renderer out of the published view, so saving the file
+    // is not enough: the session has to restate the view for the new values to arrive.
+    internal Func<CancellationToken,Task>? RefreshPreferences {get;set;}
+    // The card's own tuning panel repaints the standing card, not just the bar.
+    internal Func<CancellationToken,Task>? RefreshCard {get;set;}
+    // The panel's unsaved copy, which the renderer must see before disk is written.
+    internal Action<CommunityPreferences?>? CardDraft {get;set;}
+    // The account card's window handle, or zero when it is not standing.
+    internal Func<long>? CardWindow {get;set;}
+    // Names the panel window so the card does not dismiss when it takes focus.
+    internal Func<long,Task>? HoldCard {get;set;}
+    // Clicking outside the panel and the card dismisses both, the way clicking
+    // outside the card alone does.
+    internal Func<Task>? CloseCard {get;set;}
     public event Action? Changed;
     public Action<LayoutState>? PrepareDesktopChange { get; set; }
     private bool desktopLoaded;
@@ -176,3 +195,7 @@ public sealed class AppController
         catch { /* Diagnostic write failure must not block recovery or opening files. */ }
     }
 }
+
+// One row of the bar module catalog, as the settings page needs it: the id and the
+// label the renderer draws, plus which of the two surfaces already carry it.
+public sealed record BarModuleState(string Id,string Label,string Icon,bool Toolbar,bool Dock);

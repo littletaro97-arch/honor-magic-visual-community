@@ -228,7 +228,7 @@ public sealed class DesktopBridge : IDisposable
             {
                 if(!monitorBoards.TryGetValue(row.Key,out var board))return false;
                 var display=controller.Screens.FirstOrDefault(screen=>screen.Id==board);if(display is null)return false;
-                try{var rect=NativeDesktopHost.ReadBounds(row.Value,controller.Root);return rect!=new NativeIconRect(display.X,display.Y,display.X+display.Width,display.Y+display.Height);}catch{return false;}
+                try{var rect=NativeDesktopHost.ReadBounds(row.Value,controller.Root);return rect!=new NativeIconRect(display.DesktopLeft,display.DesktopTop,display.DesktopLeft+display.DesktopWidth,display.DesktopTop+display.DesktopHeight);}catch{return false;}
             });
             // A real restore notification also renews a lost lease even when
             // geometry is unchanged. Guard failure itself does not schedule a
@@ -616,7 +616,10 @@ public sealed class DesktopBridge : IDisposable
             var native=nativeDesktop.Snapshot;var board=controller.State.Boards.Single(b=>b.Id==display.Id);var projection=Projection(board,display,scale);
             if((controller.State.Boards.Single(b=>b.Id==display.Id).Grid is not { } existing||existing.FoldersOnly||!existing.NativeInitialized||existing.Columns!=projection.Columns||existing.Rows!=projection.Rows||controller.State.Boards.Single(b=>b.Id==display.Id).Pages is null)&&!controller.Store.ReadOnly)
                 controller.Commit(state=>{var target=state.Boards.Single(b=>b.Id==display.Id);if(target.Pages is null)DesktopPages.Initialize(state,target,projection,display.Primary);if(projection.AdaptiveSecondary)DesktopGridLayout.ResizeAdaptiveSecondary(target,projection);else DesktopGridLayout.ResizeWithoutMoving(target,projection);},"统一桌面网格已就绪，文件路径保持不变。");
-            return (200, new { boardId = display.Id, label = display.Label,workspaceRevision, rect = new { left=display.X, top=display.Y, right=display.X+display.Width, bottom=display.Y+display.Height } });
+            // P0: the renderer positions the toolbar/desktop from this rect.
+            // It must be the monitor rect (rcMonitor), otherwise a taskbar docked
+            // top/left/right leaves a gap on that edge.
+            return (200, new { boardId = display.Id, label = display.Label,workspaceRevision, rect = new { left=display.DesktopLeft, top=display.DesktopTop, right=display.DesktopLeft+display.DesktopWidth, bottom=display.DesktopTop+display.DesktopHeight } });
         }
         if(method=="GET"&&uri.AbsolutePath=="/grid-state")
         {
@@ -632,7 +635,7 @@ public sealed class DesktopBridge : IDisposable
                 key.StartsWith("card:",StringComparison.Ordinal)?cardCatalog.Types.FirstOrDefault(type=>type.Type==DesktopCards.Require(board,key[5..]).Type)?.Title??"卡片":
                 board.RootItems.Single(item=>DesktopGridActions.ItemKey(item)==key).Name;
             return(200,new{version=AppController.Version,sessionId,revision=controller.State.Revision,changeVersion=changes.Version,workspaceRevision,nativeVersion=nativeDesktop.Revision,readOnly=controller.Store.ReadOnly,boardName=board.Name,mode="unified-desktop",takeoverActive=nativeLease is not null,hiddenFolders=hidden,
-                projection=new{originX=projection.OriginX/scale,originY=projection.OriginY/scale,stepX=projection.StepX/scale,stepY=projection.StepY/scale,inset=UnifiedDesktopGrid.Inset},nativeIcons=native.Icons.Select(icon=>new{left=(icon.Left-display.X)/scale,top=(icon.Top-display.Y)/scale,right=(icon.Right-display.X)/scale,bottom=(icon.Bottom-display.Y)/scale}).ToArray(),
+                projection=new{originX=projection.OriginX/scale,originY=projection.OriginY/scale,stepX=projection.StepX/scale,stepY=projection.StepY/scale,inset=UnifiedDesktopGrid.Inset},nativeIcons=native.Icons.Select(icon=>new{left=(icon.Left-display.DesktopLeft)/scale,top=(icon.Top-display.DesktopTop)/scale,right=(icon.Right-display.DesktopLeft)/scale,bottom=(icon.Bottom-display.DesktopTop)/scale}).ToArray(),
                 collectionProblem=controller.Collections.Problem,snapshot=new{items=visibleItems.Select(item=>new{id=Id(item),name=item.Name,renameName=item.IsVirtual?null:Path.GetFileName(item.Target),icon=icons.Get(item),isFolder=item.IsFolder,isVirtual=item.IsVirtual,isRecycleBin=DesktopFileDrop.IsRecycleBin(item),managed=controller.Collections.IsManaged(item.Target)}).ToArray(),boards=controller.State.Boards.Select(b=>new{id=b.Id,name=b.Name,active=controller.Screens.Any(s=>s.Id==b.Id)}).ToArray()},
                 cardApiVersion=DesktopCardCatalog.ApiVersion,cardCatalogVersion,cardDefinitions=cardCatalog.Types,
                 board=new{boardId=board.Id,paged=board.Paged,pageId=board.ActivePageId,pages=board.Pages?.Select(page=>new{id=page.Id,count=page.Grid.Placements.Count}).ToArray(),unplaced=board.Unplaced.Keys.Select(key=>new{key,name=UnplacedName(key)}).ToArray(),columns=board.Grid.Columns,rows=board.Grid.Rows,knownIds=all.Select(Id).ToArray(),rootIds=board.RootItems.Where(item=>board.Grid.Placements.ContainsKey(DesktopGridActions.ItemKey(item))).Select(Id).ToArray(),folders=board.Boxes.Where(box=>board.Grid.Placements.ContainsKey(DesktopGridActions.FolderKey(box))).Select(box=>new{id=box.Id,name=box.Name,itemIds=box.Items.Select(Id).ToArray()}).ToArray(),cards=DesktopCards.Items(board).Where(card=>board.Grid.Placements.ContainsKey(DesktopCards.Key(card))).Select(card=>new{id=card.Id,type=card.Type,columns=card.Columns,rows=card.Rows,settings=card.Settings}).ToArray(),placements=board.Grid.Placements.ToDictionary(row=>row.Key,row=>new{x=row.Value.X,y=row.Value.Y,w=row.Value.W,h=row.Value.H})}});
@@ -772,7 +775,7 @@ public sealed class DesktopBridge : IDisposable
                 {
                     double cx=body.GetProperty("clientX").GetDouble(),cy=body.GetProperty("clientY").GetDouble(),ox=body.GetProperty("offsetX").GetDouble(),oy=body.GetProperty("offsetY").GetDouble();
                     if(!new[]{cx,cy,ox,oy}.All(double.IsFinite)||Math.Abs(cx)>65536||Math.Abs(cy)>65536||ox is <0 or >4096||oy is <0 or >4096)throw new InvalidDataException();
-                    double sourceScale=boardScales[boardId],px=display.X+cx*sourceScale,py=display.Y+cy*sourceScale;
+                    double sourceScale=boardScales[boardId],px=display.DesktopLeft+cx*sourceScale,py=display.DesktopTop+cy*sourceScale;
                     var targetDisplay=controller.Screens.SingleOrDefault(screen=>screen.Id!=boardId&&px>=screen.X&&px<screen.X+screen.Width&&py>=screen.Y&&py<screen.Y+screen.Height)??throw new LayoutEditException("请放在另一屏的桌面区域，原位置已保留。");
                     if(!boardScales.TryGetValue(targetDisplay.Id,out var targetScale)||!widgetWindows.Any(row=>monitorBoards[row.Key]==targetDisplay.Id))throw new LayoutEditException("目标屏幕尚未就绪。");
                     var targetBoard=state.Boards.Single(row=>row.Id==targetDisplay.Id);var targetProjection=Projection(state.Boards.Single(b=>b.Id==targetDisplay.Id),targetDisplay,targetScale);UnifiedDesktopGrid.Ensure(targetBoard,targetProjection);

@@ -12,12 +12,17 @@ internal sealed class NativeSystemPanel
     internal JsonObject Data { get; } = new() { ["rows"] = new JsonArray() };
     internal Dictionary<string, Command> Commands { get; } = new(StringComparer.Ordinal);
     private JsonArray Rows => Data["rows"]!.AsArray();
-    internal void Add(string id, string label, string detail = "", Command? command = null, string control = "button", bool active = false, double value = 0, string? image = null)
+    internal void Add(string id, string label, string detail = "", Command? command = null, string control = "button", bool active = false, double value = 0, string? image = null, string labelEn = "", bool? enabledOverride = null)
     {
         if (Rows.Count >= 192) return;
         if(control=="slider")control="range"; if(control=="radio")control="button"; if(control=="toggle")value=active?1:0;
-        if (label.Length > 256) label = label[..256]; if (detail.Length > 512) detail = detail[..512];
-        Rows.Add(new JsonObject { ["id"] = id, ["label"] = label, ["detail"] = detail, ["enabled"] = command is not null, ["control"] = control, ["active"] = active, ["value"] = value, ["image"] = image ?? "" });
+        if (label.Length > 256) label = label[..256]; if (detail.Length > 512) detail = detail[..512]; if (labelEn.Length > 256) labelEn = labelEn[..256];
+        var row = new JsonObject { ["id"] = id, ["label"] = label, ["detail"] = detail, ["enabled"] = enabledOverride ?? (command is not null), ["control"] = control, ["active"] = active, ["value"] = value, ["image"] = image ?? "" };
+        // An English label rides beside the Chinese one; the renderer reads it only
+        // when the popup language is English. Absent labels are omitted so the other
+        // panels keep their payload size.
+        if (labelEn.Length > 0) row["labelEn"] = labelEn;
+        Rows.Add(row);
         if (command is not null) Commands.Add(id, command);
     }
     internal static string Text(JsonElement value, string key, string fallback = "") => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() ?? fallback : fallback;
@@ -27,7 +32,23 @@ internal sealed class NativeSystemPanel
     internal static JsonElement Object(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.Object ? field : default;
     internal static Command Backend(string operation, object arguments, string valueField = "", bool boolean = false) => new(operation, JsonSerializer.SerializeToNode(arguments)!.AsObject(), ValueField: valueField, BooleanValue: boolean);
     internal static Command Local(string action, object? arguments = null) => new("", arguments is null ? new() : JsonSerializer.SerializeToNode(arguments)!.AsObject(), action);
-    internal static NativeSystemPanel Build(string kind, NativeSystemPresentationSession.Published state, bool powerView = false, bool notificationQuiet = false, bool displayView = false)
+    // The ten doors MyMagicBar's MenuSettings carried, in its order and with its
+    // targets. Each is optional and all default to off, which is what keeps the card
+    // to a couple of rows until the reader asks for more.
+    internal static IEnumerable<(string Id, string Label, string Target)> AccountEntries(CommunityPreferences card)
+    {
+        if (card.AccountEntrySystem) yield return ("account:system", "系统设置", "ms-settings:");
+        if (card.AccountEntryTaskManager) yield return ("account:taskmgr", "任务管理器", "taskmgr");
+        if (card.AccountEntryDisplay) yield return ("account:display", "显示设置", "ms-settings:display");
+        if (card.AccountEntrySound) yield return ("account:sound", "声音设置", "ms-settings:sound");
+        if (card.AccountEntryNetwork) yield return ("account:network", "网络设置", "ms-settings:network");
+        if (card.AccountEntryPower) yield return ("account:power", "电源设置", "ms-settings:powersleep");
+        if (card.AccountEntryBluetooth) yield return ("account:bluetooth", "蓝牙设置", "ms-settings:bluetooth");
+        if (card.AccountEntryNotification) yield return ("account:notify", "通知设置", "ms-settings:notifications");
+        if (card.AccountEntryLanguage) yield return ("account:language", "语言设置", "ms-settings:regionlanguage");
+        if (card.AccountEntryLocation) yield return ("account:location", "位置隐私", "ms-settings:privacy-location");
+    }
+    internal static NativeSystemPanel Build(string kind, NativeSystemPresentationSession.Published state, bool powerView = false, bool notificationQuiet = false, bool displayView = false, CommunityPreferences? accountCard = null)
     {
         kind=NativePopupIds.Canonical(kind);
         var panel = new NativeSystemPanel();
@@ -68,7 +89,37 @@ internal sealed class NativeSystemPanel
                 break;
             case "@magic/keyboard-selector":
                 panel.Data.Remove("rows"); var layouts = new JsonArray(); foreach (var item in Array(Provider("input"), "layouts")) layouts.Add(new JsonObject { ["id"] = Text(item, "id"), ["handle"] = Text(item, "id"), ["language"] = Text(item, "name"), ["name"] = Text(item, "locale"), ["active"] = Flag(item, "selected") }); panel.Data["layouts"] = layouts; break;
-            case "@magic/calendar-popup": case "@magic/user-menu": panel.Data.Remove("rows"); break;
+            case "@magic/calendar-popup": panel.Data.Remove("rows"); break;
+            case "@magic/user-menu":
+                {
+                    // The whole account card, in the order MyMagicBar carried it: the
+                    // account door, the system doors the reader switched on, the
+                    // application group, the session group, and one row that opens the
+                    // tuning panel. The session rows carry no command table entry on
+                    // purpose - the renderer emits the action name itself and
+                    // NativeSystemUiSession.FinalPopup owns it, so a stale command
+                    // mapping can never reach PanelCommand. No Remove("rows"): Rows is
+                    // Data["rows"]! unguarded.
+                    var entries = AccountEntries(accountCard ?? new CommunityPreferences()).ToArray();
+                    panel.Add("account", "荣耀账号", labelEn: "HONOR account", enabledOverride: HonorPcManager.Find() is not null);
+                    panel.Add("@divider:1", "", control: "label");
+                    foreach (var (entryId, entryLabel, entryTarget) in entries)
+                        panel.Add(entryId, entryLabel, command: Local("account-open", new { target = entryTarget }));
+                    if (entries.Length > 0) panel.Add("@divider:2", "", control: "label");
+                    panel.Add("settings", "设置", labelEn: "Settings", enabledOverride: true);
+                    panel.Add("update", "检查更新", labelEn: "Check for updates", enabledOverride: true);
+                    panel.Add("feedback", "问题反馈", labelEn: "Feedback", enabledOverride: true);
+                    panel.Add("about", "关于", labelEn: "About", enabledOverride: true);
+                    panel.Add("@divider:3", "", control: "label");
+                    panel.Add("restart", "重新启动", labelEn: "Restart", enabledOverride: true);
+                    panel.Add("sleep", "睡眠", labelEn: "Sleep", enabledOverride: true);
+                    panel.Add("shutdown", "关机", labelEn: "Shut down", enabledOverride: true);
+                    panel.Add("lock", "锁定", labelEn: "Lock", enabledOverride: true);
+                    panel.Add("@divider:4", "", control: "label");
+                    panel.Add("account-tune", "菜单卡片设置", "尺寸、位置、动画和系统入口", Local("account-tune"));
+                    panel.Add("exit", "退出社区版", labelEn: "Exit Magic Community", enabledOverride: true);
+                }
+                break;
             case "@magic/notifications":
                 var notifications = Provider("notifications");
                 panel.Add("focus",notificationQuiet?"免打扰-开":"免打扰-magic视界",command:Local("notification-quiet",new{enabled=!notificationQuiet}),active:notificationQuiet);
@@ -79,9 +130,15 @@ internal sealed class NativeSystemPanel
                 {
                     if(panel.Rows.Count>=190)break; // Keep the dismissal pair and settings footer inside the existing row bound.
                     string id = Text(item, "id"); var text = Array(item, "text").Select(x => x.GetString() ?? "").ToArray();
-                    panel.Add("notification:"+id, Text(item, "appName"), string.Join("\n", text), Text(item, "appId").Length > 0 ? Local("open-application", new { aumid = Text(item, "appId") }) : null);
+                    // A toast we could read but that carries no text would otherwise
+                    // draw as an empty card, which looks exactly like a notification
+                    // that never arrived. Say which one it is.
+                    string body = text.Length > 0 ? string.Join("\n", text) : "（这条通知没有可读取的文字）";
+                    panel.Add("notification:"+id, Text(item, "appName"), body, Text(item, "appId").Length > 0 ? Local("open-application", new { aumid = Text(item, "appId") }) : null);
                     var notice=panel.Rows.Last()!.AsObject();notice["iconUmid"]=Text(item,"appId");notice["createdFileTime"]=Text(item,"createdFileTime");
-                    panel.Add("dismiss:" + id, "清除此通知", command: Backend("notifications-remove", new { notificationId = id }));
+                    // A row kept after its sender withdrew it no longer exists in
+                    // Windows, so offering to clear it there would only fail.
+                    if (!Flag(item, "transient")) panel.Add("dismiss:" + id, "清除此通知", command: Backend("notifications-remove", new { notificationId = id }));
                 }
                 Setting("notification-settings", "通知设置", "ms-settings:notifications"); break;
             case "@magic/bluetooth-popup":

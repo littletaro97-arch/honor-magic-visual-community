@@ -120,11 +120,26 @@ struct NativePaint
         edge->SetOpacity(.38f);edge->SetStartPoint({r.right,r.top});edge->SetEndPoint({r.left,r.bottom});
         float inner=std::max(0.f,radius-1);c->DrawRoundedRectangle(D2D1::RoundedRect({r.left+1.4f,r.top+1.4f,r.right-1.4f,r.bottom-1.4f},inner,inner),edge.get(),.65f);
     }
-    void Shadow(D2D1_RECT_F r,float radius=NativeMetrics::FloatingRadius)
+    void Shadow(D2D1_RECT_F r,float radius=NativeMetrics::FloatingRadius,float room=0.f)
     {
-        // Surface separation is painted at the material boundary. No exterior
-        // contour bands: they read as a second panel during composited motion.
-        (void)r;(void)radius;
+        // A contact contour plus soft halos that fade outwards. A white card
+        // on a white window has no other way to announce its own edge, and the halo
+        // belongs outside the material - inside it would be painted over.
+        // Room is the margin the caller owns outside its material. A caller that
+        // names none gets nothing: dock bodies and tray icons pass a bare rect, and
+        // a halo there reads as a black ring around the icon rather than a shadow.
+        if(room<1.5f)return;
+        float ink=theme.dark?1.f:0.f,mix=theme.dark?.30f:1.f;
+        // Eight rings instead of three: at this radius a stepped halo reads as a
+        // banded edge, and one ring per pixel and a quarter disappears into a gradient.
+        for(int ring=7;ring>=0;--ring){
+            float t=(ring+1)/8.f,spread=room*t,drop=room*.34f*t;
+            Fill({r.left-spread,r.top-spread+drop,r.right+spread,r.bottom+spread+drop},
+                 D2D1::ColorF(ink,ink,ink,(.038f+.077f*(1.f-t))*mix),radius+spread*.8f);
+        }
+        // Half a pixel: the eye reads a contour, never a border.
+        c->DrawRoundedRectangle(D2D1::RoundedRect({r.left-.5f,r.top-.5f,r.right+.5f,r.bottom+.5f},radius+.5f,radius+.5f),
+                                Color(D2D1::ColorF(ink,ink,ink,theme.dark?.10f:.14f)),1.f);
     }
     void Interaction(NativeInteractionRegion const &region,bool selected,bool hovered=false,bool focused=false)
     {

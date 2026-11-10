@@ -26,6 +26,17 @@ struct InstalledActivity {
     }
     ~InstalledActivity(){if(handle)CloseHandle(handle);}
 };
+static int ReportStartupState(winrt::Windows::ApplicationModel::StartupTaskState state){
+    using winrt::Windows::ApplicationModel::StartupTaskState;
+    // ASCII on purpose: the parent reads this pipe as UTF-8, so writing UTF-16
+    // here arrives as "d\0i\0s\0..." and reads as an unknown state.
+    const char* name=state==StartupTaskState::Enabled?"enabled":state==StartupTaskState::EnabledByPolicy?"enabled-by-policy":state==StartupTaskState::Disabled?"disabled":"disabled-by-policy";
+    std::string line(name);line.push_back('\n');
+    HANDLE output=GetStdHandle(STD_OUTPUT_HANDLE);
+    if(output&&output!=INVALID_HANDLE_VALUE){DWORD written=0;WriteFile(output,line.data(),static_cast<DWORD>(line.size()),&written,nullptr);}
+    // The state itself is the answer, so a readable answer is always a success.
+    return 0;
+}
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR arguments,int){
     try{
         if(InstallationInProgress())return ERROR_INSTALL_ALREADY_RUNNING;
@@ -34,7 +45,6 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR arguments,int){
         wchar_t buffer[32768]{};DWORD length=GetModuleFileNameW(nullptr,buffer,32768);if(!length||length>=32768)return 3;auto directory=std::filesystem::path(std::wstring(buffer,length)).parent_path();
         if(unpackaged&&!magic::installed::Tree(directory)){MessageBoxW(nullptr,L"安装位置或文件权限不正确。请重新运行完整安装包；不要直接运行解压后的程序。",L"Magic 视界社区版",MB_OK|MB_ICONERROR);return 3;}
         std::ifstream file(directory/L"native-launch.json",std::ios::binary);std::string text((std::istreambuf_iterator<char>(file)),{});if(text.empty()||text.size()>8192)return 3;
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);auto document=winrt::Windows::Data::Json::JsonObject::Parse(winrt::to_hstring(text));bool installed=document.GetNamedNumber(L"schemaVersion",1)==2 && document.GetNamedString(L"dataRootMode",L"")==L"per-user";
         int setupArgc=0;auto setupArgv=CommandLineToArgvW(GetCommandLineW(),&setupArgc);
         std::wstring startup;
         bool logon=false,configure=false;
@@ -44,12 +54,17 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR arguments,int){
             for(int i=1;i<setupArgc;i++)if(std::wstring_view(setupArgv[i])==L"--configure")configure=true;
             LocalFree(setupArgv);
         }
+        // MTA on purpose: an STA without a message pump blocks IAsyncOperation::get()
+        // until the caller's timeout. The consent prompt is drawn by the shell.
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        auto document=winrt::Windows::Data::Json::JsonObject::Parse(winrt::to_hstring(text));bool installed=document.GetNamedNumber(L"schemaVersion",1)==2 && document.GetNamedString(L"dataRootMode",L"")==L"per-user";
         if(installed&&!startup.empty()){
             if(unpackaged)return 3; // Unpackaged startup is an opt-in profile flag.
             auto task=winrt::Windows::ApplicationModel::StartupTask::GetAsync(L"MagicCommunityStartup").get();
-            if(startup==L"disable"){task.Disable();return 0;}
-            if(startup!=L"enable")return 3;
-            return task.RequestEnableAsync().get()==winrt::Windows::ApplicationModel::StartupTaskState::Enabled?0:4;
+            if(startup==L"disable")task.Disable();
+            else if(startup==L"enable"){try{task.RequestEnableAsync().get();}catch(...){ReportStartupState(task.State());return 5;}}
+            else if(startup!=L"state")return 3;
+            return ReportStartupState(task.State());
         }
         auto root=std::wstring(document.GetNamedString(L"root",L""));
         if(installed){

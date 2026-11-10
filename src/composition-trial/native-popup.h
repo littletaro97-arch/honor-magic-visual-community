@@ -1,5 +1,6 @@
 #pragma once
 #include "native-appearance.h"
+#include "native-brand.h"
 #include "native-tooltip-layout.h"
 #include "native-popup-placement.h"
 #include "native-context-motion.h"
@@ -30,6 +31,14 @@ struct NativePopup
 {
     App &app;
     HWND hwnd = nullptr, previousFocus = nullptr;
+    // The card's tuning panel is a separate window in the adapter process. While it
+    // is open the card must not read its own deactivation as "the reader left": this
+    // is the one window that keeps the card standing.
+    HWND holdWindow = nullptr;
+    // The panel's process: WPF may recreate the panel's HWND between EnsureHandle and
+    // Show, so a handle that no longer matches must not dismiss the card while the
+    // reader is still in the panel. Only this one process's windows are exempt.
+    DWORD holdPid = 0;
     float dpi = 96, width = 360, height = 440;
     std::wstring token, kind, caption, status, armed;
     ULONGLONG armedUntil = 0;
@@ -41,6 +50,9 @@ struct NativePopup
         focus = -1;
     int visibleRows = 8, hover = -1,pressedTray=-1;
     float appearanceOverflow=0,appearanceTop=0,appearanceView=0,appearanceOffset=0;
+    // Content bottom of the account card as laid out, before the card's own scroll
+    // shifts it. The height contract reads this; other kinds leave it at zero.
+    float userMenuBottom=0;
     POINT trayPress{};bool trayDragging=false;
     Preview70Icons appearanceIcons;
     NativeTooltipLayout tooltipLayout;
@@ -84,7 +96,7 @@ struct NativePopup
         if(!horizontal){int origin=Str(payload,L"alignX")==L"End"?w:Str(payload,L"alignX")==L"Center"?w/2:0;x=std::clamp(ax-origin,static_cast<int>(m.rcWork.left),std::max(static_cast<int>(m.rcWork.left),static_cast<int>(m.rcWork.right)-w));}
         motionAnchorX=horizontal?placement.origin:width/2;centeredAtTrigger=horizontal&&placement.centered;
         int y=DropdownClampTop(Str(payload,L"alignY")==L"Start"?DropdownTop(ay,scale):ay-(Str(payload,L"alignY")==L"End"?h:h/2),m.rcWork,h);
-        NativeLayerPosition(hwnd,x,y,w,h,SWP_NOACTIVATE);auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(2*NativeMetrics::FloatingRadius*scale),static_cast<int>(2*NativeMetrics::FloatingRadius*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);
+        NativeLayerPosition(hwnd,x,y,w,h,SWP_NOACTIVATE);auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(2*MaterialRadius()*scale),static_cast<int>(2*MaterialRadius()*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);
     }
     bool dismissing=false,opening=false,centeredAtTrigger=false;
     float motionAnchorX=-1;
@@ -188,21 +200,83 @@ struct NativePopup
     std::function<bool(ID2D1DeviceContext*,std::wstring const&,D2D1_RECT_F)> contextIcon;
     float ContextPadding()const{return Str(Data(),L"menuStyle")==L"toolbar"?8.f:20.f;}
     float ContextViewport()const{return std::max(1.f,height-ContextPadding());}
-    bool ContextOverflows()const{return false;} // Context menus use columns, never scrolling.
+    // v0.4.9 lays a long menu out in columns, which runs the rightmost one past the
+    // monitor edge on a list like the 39-vendor mark picker. The scrolling column is
+    // the default here and the column layout stays available from the bar's own menu.
+    bool ContextScrolls()const{return Str(app.model.preferences,L"contextMenuLayout")!=L"columns";}
+    bool ContextOverflows()const{return ContextScrolls()&&contextTotal>ContextViewport()+.5f;}
     float contextColumnWidth=0;
     int contextColumns=1;
     struct ContextLayout {float width,height,columnWidth;int columns;};
-    static ContextLayout MeasureContext(JsonArray const &values,std::wstring const &style,float maximumWidth,float maximumHeight,float preferredWidth){
+    static ContextLayout MeasureContext(JsonArray const &values,std::wstring const &style,float maximumWidth,float maximumHeight,float preferredWidth,bool scrolls){
         float padding=style==L"toolbar"?8.f:20.f;
         auto rowHeight=[&](auto const &v){return Str(v.GetObject(),L"control")==L"separator"?9.f:(style==L"shell"||style==L"toolbar")?40.f:32.f;};
         float content=padding;for(auto const &v:values)content+=rowHeight(v);
-        float h=std::min(content,maximumHeight),viewport=std::max(1.f,h-padding),used=0;int columns=1;
+        float h=std::min(content,maximumHeight);
+        if(scrolls){float column=std::min(preferredWidth,maximumWidth);return {column,h,column,1};}
+        float viewport=std::max(1.f,h-padding),used=0;int columns=1;
         for(auto const &v:values){float row=rowHeight(v);if(used>0&&used+row>viewport+.1f){++columns;used=0;}used+=row;}
         float column=std::min(preferredWidth,maximumWidth/columns);return {column*columns,h,column,columns};
     }
     void LayoutContext(float maximumWidth,float maximumHeight,float preferredWidth){
-        auto layout=MeasureContext(Data().GetNamedArray(L"rows"),Str(Data(),L"menuStyle"),maximumWidth,maximumHeight,preferredWidth);
+        bool scrolls=ContextScrolls();
+        auto layout=MeasureContext(Data().GetNamedArray(L"rows"),Str(Data(),L"menuStyle"),maximumWidth,maximumHeight,preferredWidth,scrolls);
         width=layout.width;height=layout.height;contextColumnWidth=layout.columnWidth;contextColumns=layout.columns;contextScroll=0;
+        // One line per measurement: the switch is a preference, so "it did nothing" has to
+        // be distinguishable from "it measured one column anyway" without a debugger.
+        JsonObject trace;trace.Insert(L"scrolls",JsonValue::CreateBooleanValue(scrolls));Put(trace,L"columns",static_cast<double>(contextColumns));Put(trace,L"width",static_cast<double>(width));Put(trace,L"height",static_cast<double>(height));Put(trace,L"columnWidth",static_cast<double>(contextColumnWidth));Put(trace,L"rows",static_cast<double>(Data().GetNamedArray(L"rows").Size()));Put(trace,L"maxHeight",static_cast<double>(maximumHeight));Put(trace,L"preferredWidth",static_cast<double>(preferredWidth));Put(trace,L"style",Str(Data(),L"menuStyle"));app.Telemetry(L"context-layout",trace);
+    }
+    // The level's base width: the same number Show() feeds MeasureContext, kept so an
+    // in-place re-layout measures with the same input instead of its own output.
+    float contextPreferredWidth=300;
+    struct ContextFrame{int x=0,y=0,width=0,height=0;};
+    // One geometry for a cascade level: measure from the level's own packet, then place
+    // it from the anchor that opened it, with the same transparent gutter Show() adds.
+    // Show() and SetContextRows() both call this, so re-laying in place lands exactly
+    // where reopening the level does.
+    ContextFrame MeasureAndPlaceContext(RECT const &work){
+        float scale=dpi/96;
+        float maxWidth=(work.right-work.left)/scale-12,maxHeight=(work.bottom-work.top)/scale-12;
+        LayoutContext(maxWidth,maxHeight,contextPreferredWidth);
+        width=std::min(width,(work.right-work.left)/scale-20);height=std::min(height,(work.bottom-work.top)/scale-20);
+        // Shrinking the finished frame to the 8 MiB surface bound left it narrower
+        // than columns*columnWidth, so the last column and its tick fell outside.
+        // Feed the tighter width back into the same measurement instead: the
+        // columns narrow with the frame and every column stays inside it. A single
+        // column has none to give back and keeps the minimal scale below.
+        for(int attempt=0;attempt<8&&contextColumns>1&&width*height*scale*scale*4>8*1024*1024.f;++attempt){
+            float budget=8*1024*1024.f/(height*scale*scale*4)*.998f;
+            if(budget>=width)break;
+            LayoutContext(budget,maxHeight,contextPreferredWidth);
+            width=std::min(width,(work.right-work.left)/scale-20);height=std::min(height,(work.bottom-work.top)/scale-20);
+        }
+        float fit=std::min(1.f,std::sqrt((8*1024*1024.f)/(width*height*scale*scale*4)));if(fit<1){width*=fit*.998f;height*=fit*.998f;}
+        auto payload=packet.GetNamedObject(L"payload"),point=payload.GetNamedObject(L"desiredPosition");
+        int ax=static_cast<int>(Num(point,L"x")),ay=static_cast<int>(Num(point,L"y"));
+        int pw=static_cast<int>(std::ceil(width*scale)),ph=static_cast<int>(std::ceil(height*scale));
+        auto offset=[](std::wstring const &align,int size){return align==L"Center"?size/2:align==L"End"?size:0;};
+        int x=ax-offset(Str(payload,L"alignX"),pw),y=ay-offset(Str(payload,L"alignY"),ph);
+        if(Num(payload,L"contextDepth")>0&&payload.HasKey(L"contextParentLeft")){
+            auto side=NativeContextMotion::ChildX(static_cast<int>(Num(payload,L"contextParentLeft")),static_cast<int>(Num(payload,L"contextParentRight")),pw,work,scale);
+            ax=x=side.x;payload.Insert(L"contextFlipped",JsonValue::CreateBooleanValue(side.flipped));
+        }
+        x=std::clamp(x,static_cast<int>(work.left),static_cast<int>(work.right)-pw);
+        y=DropdownClampTop(y,work,ph);
+        centeredAtTrigger=false;motionAnchorX=-1;
+        previewOrigin={static_cast<float>((Num(payload,L"previewAnchorX",ax)-x)/scale),Str(payload,L"alignY")==L"End"?height:Str(payload,L"alignY")==L"Start"?0.f:static_cast<float>((Num(payload,L"previewAnchorY",ay)-y)/scale)};
+        contentX=contentY=0;
+        if(AnimatedContext()){
+            contextChild=Num(payload,L"contextDepth")>0;contextFlipped=Bool(payload,L"contextFlipped");
+            auto placement=NativeContextMotion::Place({ax,ay},work,pw,ph,scale,contextChild,contextFlipped,static_cast<float>(Num(payload,L"contextAnchorY",ay+22*scale)));
+            if(!DesktopContext()&&!contextChild){
+                // Keep the bar's existing centered/edge-clamped placement.
+                contextOrigin={std::clamp((ax-x)/scale,4.f,width-4),std::clamp((ay-y)/scale,4.f,height-4)};
+            }else{x=placement.x;y=placement.y;contextOrigin=placement.origin;}
+            // Transparent overshoot allowance is not a second material/background.
+            contentX=NativeContextMotion::Gutter(width);contentY=NativeContextMotion::Gutter(height);
+            x-=static_cast<int>(contentX*scale);y-=static_cast<int>(contentY*scale);pw+=static_cast<int>(2*contentX*scale);ph+=static_cast<int>(2*contentY*scale);
+        }
+        return {x,y,pw,ph};
     }
     float contextScroll=0,contextTotal=0,contextDragY=0,contextDragStart=0;
     bool contextDragging=false,contextScrollbarHover=false;
@@ -210,12 +284,24 @@ struct NativePopup
     void BuildContextRows();void PaintContext(ID2D1DeviceContext *c);
     void SetContextRows(JsonArray const &values){
         Data().Insert(L"rows",values);scroll=0;focus=-1;hover=-1;contextScroll=0;
-        if(hwnd){RECT rect{};GetWindowRect(hwnd,&rect);MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);float scale=dpi/96;
-            LayoutContext((monitor.rcWork.right-monitor.rcWork.left)/scale-12,(monitor.rcWork.bottom-monitor.rcWork.top)/scale-12,contextColumnWidth>0?contextColumnWidth:width);visibleRows=std::max(1,static_cast<int>((height-20)/32));
-            int pw=static_cast<int>(std::ceil(width*scale)),ph=static_cast<int>(std::ceil(height*scale));int y=std::clamp(rect.top,monitor.rcWork.top+4,std::max(monitor.rcWork.top+4,monitor.rcWork.bottom-ph-4));
-            int x=std::clamp(rect.left,monitor.rcWork.left+4,std::max(monitor.rcWork.left+4,monitor.rcWork.right-pw-4));
-            NativeLayerPosition(hwnd,x,y,pw,ph,SWP_NOACTIVATE);auto region=CreateRoundRectRgn(0,0,pw+1,ph+1,static_cast<int>(2*NativeMetrics::FloatingRadius*scale),static_cast<int>(2*NativeMetrics::FloatingRadius*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);Release();
+        if(hwnd&&packet){MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);float scale=dpi/96;
+            // Same measurement and anchor as Show(): the level must land where reopening
+            // it would, and the window must carry the paint's transparent gutter or the
+            // region clips the right and bottom edges away.
+            auto frame=MeasureAndPlaceContext(monitor.rcWork);visibleRows=std::max(1,static_cast<int>((height-20)/32));
+            if(popupRoot)popupRoot.Size({static_cast<float>(frame.width),static_cast<float>(frame.height)});if(popupScene)popupScene.Size({static_cast<float>(frame.width),static_cast<float>(frame.height)});
+            if(visual)visual.Offset({contentX*scale,contentY*scale,0});
+            if(AnimatedContext())SetWindowRgn(hwnd,nullptr,FALSE);
+            else{auto region=CreateRoundRectRgn(0,0,frame.width+1,frame.height+1,static_cast<int>(2*MaterialRadius()*scale),static_cast<int>(2*MaterialRadius()*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);}
+            NativeLayerPosition(hwnd,frame.x,frame.y,frame.width,frame.height,SWP_NOACTIVATE);Release();
         }BuildRows();Draw();
+    }
+    // A rebuild regenerates a level's rows in place. The cascade saves this value before
+    // SetContextRows and puts it back afterwards, clamped to the new scroll range.
+    float ContextScrollOffset()const{return contextScroll;}
+    void SetContextScrollOffset(float value){
+        contextScroll=std::clamp(value,0.f,std::max(0.f,contextTotal-ContextViewport()));
+        if(hwnd&&packet){BuildRows();Draw();}
     }
     JsonObject PickerDefinition()const;
     void BuildPickerRows();void PaintPicker(ID2D1DeviceContext *c);void PickerActivate(PopupRow const &row);
@@ -241,7 +327,9 @@ struct NativePopup
     float functionalTop=58,functionalBottom=0,functionalOverflow=0,functionalExtent=0;
     NativeOfficialPanelSvg officialPanelIcons;
     D2D1_RECT_F RangeTrack(PopupRow const &row)const{auto r=row.rect;if(kind==L"@magic/media-popup"&&row.id.starts_with(L"volume:")&&row.id!=L"volume:microphone")return {r.left+46,r.top+6,r.right-16,r.bottom-6};bool compact=!Flyout()&&(kind==L"@magic/media-popup"||kind==L"@magic/quick-settings"&&!PowerView()&&!DisplayView());return {r.left+(compact?52:12),r.bottom-34,r.right-(compact?54:12),r.bottom-6};}
-    float ContentTop()const{return kind==L"@magic/quick-settings"&&!PowerView()&&!DisplayView()?14.f:kind==L"@magic/apps-menu"?18.f:54.f;}
+    // The account card's rows begin below the brand header; while the card scrolls,
+    // that boundary is also the clip, or a half-scrolled row would paint over it.
+    float ContentTop()const{return kind==L"@magic/quick-settings"&&!PowerView()&&!DisplayView()?14.f:kind==L"@magic/apps-menu"?18.f:kind==L"@magic/user-menu"?76.f:54.f;}
     void LayoutPreview70();
     void PaintPreview70(ID2D1DeviceContext *c);
     long long shows = 0, hides = 0, redraws = 0;
@@ -295,7 +383,15 @@ struct NativePopup
     NativeHoverVisual interactionVisual;D2D1_POINT_2F interactionPoint{};
     bool Glass()const{return !NativeLowPower(app.model)&&(materialVisual||glassSheet.root||materialPreview);}
     NativeMaterial MaterialTier()const{return LocalContext()||LocalTooltip()||Flyout()||ToolbarDropdown()||kind==L"@magic/power-menu"?NativeMaterial::Menu:NativeMaterial::Panel;}
-    float MaterialRadius()const{return Flyout()?28.f:LocalTooltip()||LocalDockPreview()||LocalContext()&&Str(Data(),L"menuStyle")==L"toolbar"?10.f:NativeMetrics::FloatingRadius;}
+    float MaterialRadius()const{
+        if(Flyout())return 28.f;
+        if(LocalTooltip()||LocalDockPreview())return 10.f;
+        if(LocalContext()&&Str(Data(),L"menuStyle")==L"toolbar")return 10.f;
+        // The account card carries its own corner; the window region reads from here
+        // too, so changing only the paint would be clipped away.
+        if(kind==L"@magic/user-menu"){double r=Num(app.model.preferences,L"accountCardRadius");if(r>=8&&r<=32)return static_cast<float>(r);}
+        return NativeMetrics::FloatingRadius;
+    }
     D2D1_RECT_F MaterialBounds()const{return LocalContext()?D2D1::RectF(4,4,width-4,height-4):LocalTooltip()||LocalDockPreview()?D2D1::RectF(0,0,width,height):D2D1::RectF(10,10,width-10,height-10);}
     struct PickerTile {SpriteVisual visual{nullptr};CompositionDrawingSurface surface{nullptr};int width=0,height=0;};
     std::vector<PickerTile> pickerTiles;
@@ -328,6 +424,77 @@ struct NativePopup
     JsonObject Account() const
     {
         return packet.GetNamedObject(L"account");
+    }
+    // Account-card row metrics. LayoutPreview70 applies the same range gates and the
+    // same fallbacks; these are the named values this side reads, so the estimate and
+    // the renderer cannot drift by a typed-in number.
+    static constexpr float AccountRowHeightMin=28,AccountRowHeightMax=52,AccountRowHeightDefault=38;
+    static constexpr float AccountGapMin=0,AccountGapMax=16,AccountGapDefault=0;
+    // The account card's content bottom, derived from the packet's rows with the
+    // same accumulation LayoutPreview70 runs, so the card height is final before
+    // BuildRows lays anything out.
+    float UserMenuContentBottom() const
+    {
+        auto entries = Data().GetNamedArray(L"rows");
+        int count = std::min(256, static_cast<int>(entries.Size()));
+        double wantedRow = Num(app.model.preferences, L"accountCardRowHeight");
+        double wantedGap = Num(app.model.preferences, L"accountCardGap");
+        float rowHeight = (wantedRow >= AccountRowHeightMin && wantedRow <= AccountRowHeightMax)
+                              ? static_cast<float>(wantedRow)
+                              : AccountRowHeightDefault;
+        float rowGap = (wantedGap >= AccountGapMin && wantedGap <= AccountGapMax)
+                           ? static_cast<float>(wantedGap)
+                           : AccountGapDefault;
+        float y = 76, bottom = 76;
+        for (int i = 0; i < count; i++)
+        {
+            auto item = entries.GetAt(i).GetObject();
+            if (Str(item, L"control") == L"label") { bottom = y + 6; y += 13 + rowGap; }
+            else { bottom = y + rowHeight; y += rowHeight + rowGap; }
+        }
+        return bottom;
+    }
+    // The smallest card still shows the brand header and one full row: rows begin at
+    // 76 DIP and the scroll viewport ends at height-18, so the floor is 94 + the
+    // reader's row height (122 at 28 DIP, 146 at 52 DIP).
+    float UserMenuMinimumHeight() const
+    {
+        double wantedRow = Num(app.model.preferences, L"accountCardRowHeight");
+        float rowHeight = (wantedRow >= AccountRowHeightMin && wantedRow <= AccountRowHeightMax)
+                              ? static_cast<float>(wantedRow)
+                              : AccountRowHeightDefault;
+        return 76.f + rowHeight + 18.f;
+    }
+    // The card's height contract: the reader's height is the card's height. Content
+    // that does not fit scrolls inside it; content shorter than the card leaves the
+    // chosen height standing. The work area is the ceiling.
+    float UserMenuHeight(float workHeight, float scale) const
+    {
+        double cardHeight = Num(app.model.preferences, L"accountCardHeight");
+        float preferred = (cardHeight >= 320 && cardHeight <= 780) ? static_cast<float>(cardHeight) : 528.f;
+        float limit = std::max(130.f, workHeight / scale - 20);
+        return std::min(std::max(preferred, UserMenuMinimumHeight()), limit);
+    }
+    // One re-frame for the standing card: settle width/height from the same contract
+    // Show() uses, then resize around the reader's current top-left. A slider must
+    // change the card, never move it.
+    void ReframeCard(){
+        if(!hwnd)return;
+        MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);float scale=dpi/96;
+        double cardWidth=Num(app.model.preferences,L"accountCardWidth");
+        if(cardWidth>=260&&cardWidth<=560)width=static_cast<float>(cardWidth);
+        height=UserMenuHeight(static_cast<float>(monitor.rcWork.bottom-monitor.rcWork.top),scale);
+        width=std::min(width,(monitor.rcWork.right-monitor.rcWork.left)/scale-20);height=std::min(height,(monitor.rcWork.bottom-monitor.rcWork.top)/scale-20);
+        float fit=std::min(1.f,std::sqrt((8*1024*1024.f)/(width*height*scale*scale*4)));if(fit<1){width*=fit*.998f;height*=fit*.998f;}
+        RECT bounds{};GetWindowRect(hwnd,&bounds);
+        int w=static_cast<int>(std::ceil(width*scale)),h=static_cast<int>(std::ceil(height*scale));
+        int x=std::clamp(static_cast<int>(bounds.left),static_cast<int>(monitor.rcWork.left),std::max(static_cast<int>(monitor.rcWork.left),static_cast<int>(monitor.rcWork.right)-w));
+        int y=DropdownClampTop(bounds.top,monitor.rcWork,h);
+        if(w==bounds.right-bounds.left&&h==bounds.bottom-bounds.top&&x==bounds.left&&y==bounds.top)return;
+        if(popupRoot)popupRoot.Size({static_cast<float>(w),static_cast<float>(h)});if(popupScene)popupScene.Size({static_cast<float>(w),static_cast<float>(h)});
+        if(visual)visual.Offset({contentX*scale,contentY*scale,0});
+        auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(2*MaterialRadius()*scale),static_cast<int>(2*MaterialRadius()*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);
+        NativeLayerPosition(hwnd,x,y,w,h,SWP_NOACTIVATE);
     }
     std::wstring Kind() const
     {
@@ -381,7 +548,7 @@ struct NativePopup
     {
         if (!visible)
             return;
-        visible = false;dismissing=false;closing=true;ShowWindow(hwnd,SW_HIDE);ResetPanelMotion();
+        visible = false;dismissing=false;closing=true;holdWindow=nullptr;holdPid=0;ShowWindow(hwnd,SW_HIDE);ResetPanelMotion();
         auto dismiss=std::move(contextDismiss);contextAction={};if(dismiss)dismiss();
         closing = true;
         if(GetCapture()==hwnd)ReleaseCapture();pressedTray=-1;trayDragging=false;
@@ -448,19 +615,28 @@ struct NativePopup
             int count = std::min(256, static_cast<int>(entries.Size()));
             if(!rangeEdits.empty()){std::set<std::wstring> offeredRanges;for(int i=0;i<count;++i){auto item=entries.GetAt(i).GetObject();if(Str(item,L"control")==L"range")offeredRanges.insert(Str(item,L"id"));}
                 std::erase_if(rangeEdits,[&](auto const &edit){return !offeredRanges.contains(edit.first);});}
-            if(!FunctionalPanel())scroll = std::clamp(scroll, 0, std::max(0, count - visibleRows));
+            if(!FunctionalPanel()&&kind!=L"@magic/user-menu")scroll = std::clamp(scroll, 0, std::max(0, count - visibleRows));
             for (int i = 0; i < count; i++)
             {
                 auto item = entries.GetAt(i).GetObject();
                 float y = 58 + (i - scroll) * 56.0f;
-                add(Str(item, L"id"), Str(item, L"label"), L"native-command", {14, y, width - 14, y + 52},
+                auto label = Str(item, L"label");
+                if (english) { auto translated = Str(item, L"labelEn"); if (!translated.empty()) label = translated; }
+                add(Str(item, L"id"), label, L"native-command", {14, y, width - 14, y + 52},
                     Str(item, L"detail"), Bool(item, L"enabled", true), Bool(item, L"active"));
                 auto &row = rows.back();
                 row.id = row.key;
                 row.control = Str(item, L"control");
                 if(kind==L"@magic/power-menu"&&(row.id==L"lock"||row.id==L"sleep"||row.id==L"restart"||row.id==L"shutdown"||row.id==L"settings"||row.id==L"exit"))row.action=row.id;
+                // The account card offers the same session actions, but its rows carry
+                // no command table entry: the name itself is the receipt, checked
+                // against the session's user-menu whitelist. account:* and account-tune
+                // keep native-command so the adapter still resolves their local action.
+                if(kind==L"@magic/user-menu"&&(row.id==L"account"||row.id==L"settings"||row.id==L"update"||row.id==L"feedback"||row.id==L"about"||row.id==L"restart"||row.id==L"sleep"||row.id==L"shutdown"||row.id==L"lock"||row.id==L"exit"))row.action=row.id;
                 row.value = row.control==L"range"?RangeValue(row.id,Num(item,L"value")):Num(item,L"value");
-                row.offscreen = FunctionalPanel()?false:i < scroll || i >= scroll + visibleRows;
+                // The card lays every row out from its own height, so the generic
+                // row-window does not decide what is reachable there.
+                row.offscreen = FunctionalPanel()?false:kind==L"@magic/user-menu"?false:i < scroll || i >= scroll + visibleRows;
                 if (row.control == L"text" || row.control == L"password")
                 {
                     if(!hwnd||!visible||dismissing)continue;
@@ -531,26 +707,37 @@ struct NativePopup
             struct Item
             {
                 wchar_t const *key, *zh, *en;
+                bool divider;
             };
-            Item items[] = {{L"account", L"荣耀账号", L"HONOR account"},
-                            {L"settings", L"设置", L"Settings"},
-                            {L"sleep", L"睡眠", L"Sleep"},
-                            {L"restart", L"重新启动", L"Restart"},
-                            {L"shutdown", L"关机", L"Shut down"},
-                            {L"lock", L"锁定", L"Lock"},
-                            {L"update", L"检查更新", L"Check for updates"},
-                            {L"feedback", L"问题反馈", L"Feedback"},
-                            {L"about", L"关于", L"About"},
-                            {L"exit", L"退出社区版", L"Exit Magic Community"}};
-            float y = 102;
-            for (int i = 0; i < 10; i++)
+            // Same grouping as the brand menu: account, application, session,
+            // exit. Divider rows carry no action so they stay inert.
+            Item items[] = {{L"account", L"荣耀账号", L"HONOR account", false},
+                            {L"", L"", L"", true},
+                            {L"settings", L"设置", L"Settings", false},
+                            {L"update", L"检查更新", L"Check for updates", false},
+                            {L"feedback", L"问题反馈", L"Feedback", false},
+                            {L"about", L"关于", L"About", false},
+                            {L"", L"", L"", true},
+                            {L"restart", L"重新启动", L"Restart", false},
+                            {L"sleep", L"睡眠", L"Sleep", false},
+                            {L"shutdown", L"关机", L"Shut down", false},
+                            {L"lock", L"锁定", L"Lock", false},
+                            {L"", L"", L"", true},
+                            {L"exit", L"退出社区版", L"Exit Magic Community", false}};
+            float y = 76;
+            int divider = 0;
+            for (auto const &item : items)
             {
-                if (i == 2 || i == 6 || i == 9)
-                    y += 8;
-                auto const &item = items[i];
-                bool enabled = (i != 0 || Bool(Account(), L"accountAvailable"));
-                add(item.key, Ui(item.zh, item.en), item.key, {14, y, width - 14, y + 34}, L"", enabled);
-                y += 36;
+                if (item.divider)
+                {
+                    add(L"@divider:" + std::to_wstring(++divider), L"", L"", {14, y, width - 14, y + 13}, L"", false);
+                    rows.back().control = L"label";
+                    y += 13;
+                    continue;
+                }
+                bool enabled = (std::wstring(item.key) != L"account" || Bool(Account(), L"accountAvailable"));
+                add(item.key, Ui(item.zh, item.en), item.key, {14, y, width - 14, y + 38}, L"", enabled);
+                y += 38;
             }
         }
         LayoutPreview70();
@@ -604,6 +791,13 @@ struct NativePopup
         packet = value;
         token = nextToken;
         kind = nextKind;
+        // A card opened while the tuning panel already stands inherits the hold with
+        // its first packet, before the panel can take focus again. The preferences
+        // block is the panel's unsaved copy, so the fresh card is shaped from it.
+        if(value.HasKey(L"holdWindow"))holdWindow=reinterpret_cast<HWND>(static_cast<UINT_PTR>(Num(value,L"holdWindow")));
+        if(value.HasKey(L"holdPid"))holdPid=static_cast<DWORD>(Num(value,L"holdPid"));
+        if(auto preferred=value.TryLookup(L"preferences");preferred&&preferred.ValueType()==JsonValueType::Object)
+            app.model.preferences=preferred.GetObject();
         status.clear();
         previewPreparing=LocalDockPreview();previewMounted=false;previewEnterAt=0;
         bluetoothExpanded.clear();networkExpanded.clear();quickDevices=audioAdvanced=false;flyoutExpanded=flyoutDragging=flyoutInFlight=flyoutPending=false;flyoutScroll=0;
@@ -626,8 +820,15 @@ struct NativePopup
         width = Flyout()?380:FunctionalPanel()?360:LocalContext()?300:LocalPicker()?960:kind==L"@magic/apps-menu"?760:kind==L"@magic/task-switcher"?800:kind==L"@magic/user-menu"?370:kind==L"@magic/quick-settings"?360:kind==L"@magic/power-menu"?380:320;
         height = generic                             ? 74 + std::min(8u, data.GetNamedArray(L"rows").Size()) * 56.0f
                  : kind == L"@magic/calendar-popup" ? CalendarHeight()
-                 : kind == L"@magic/user-menu"      ? 510
+                 : kind == L"@magic/user-menu"      ? 528
                                                 : 110 + std::min(6u, data.GetNamedArray(L"layouts").Size()) * 62.0f;
+        if(kind==L"@magic/user-menu"){
+            // Width still travels with the card's own number; its gate is the slider's
+            // own 260-560 range, so a value that takes effect inside the panel also
+            // survives the next open.
+            auto look=app.model.preferences;double cardWidth=Num(look,L"accountCardWidth");
+            if(cardWidth>=260&&cardWidth<=560)width=static_cast<float>(cardWidth);
+        }
         auto payload = value.GetNamedObject(L"payload"), point = payload.GetNamedObject(L"desiredPosition");
         int ax = static_cast<int>(Num(point, L"x")), ay = static_cast<int>(Num(point, L"y"));
         if (std::abs(static_cast<long long>(ax)) > 65536 || std::abs(static_cast<long long>(ay)) > 65536)
@@ -691,9 +892,9 @@ struct NativePopup
             width=tooltipLayout.width;height=tooltipLayout.height;
         }
         else if(LocalContext()){
-            width=Str(data,L"menuStyle")==L"shell"?240:300;
-            if(Str(data,L"menuStyle")==L"toolbar"){width=200;for(auto const &v:data.GetNamedArray(L"rows")){auto label=Str(v.GetObject(),L"label");com_ptr<IDWriteTextLayout> layout;auto f=app.graphics.Format(12.8f,false,600);check_hresult(app.graphics.text->CreateTextLayout(label.c_str(),static_cast<UINT32>(label.size()),f,4096,100,layout.put()));DWRITE_TEXT_METRICS metrics{};layout->GetMetrics(&metrics);width=std::max(width,metrics.widthIncludingTrailingWhitespace+80);}}
-            LayoutContext((available.rcWork.right-available.rcWork.left)/scale-12,(available.rcWork.bottom-available.rcWork.top)/scale-12,width);
+            contextPreferredWidth=Str(data,L"menuStyle")==L"shell"?240:300;
+            if(Str(data,L"menuStyle")==L"toolbar"){contextPreferredWidth=200;for(auto const &v:data.GetNamedArray(L"rows")){auto label=Str(v.GetObject(),L"label");com_ptr<IDWriteTextLayout> layout;auto f=app.graphics.Format(12.8f,false,600);check_hresult(app.graphics.text->CreateTextLayout(label.c_str(),static_cast<UINT32>(label.size()),f,4096,100,layout.put()));DWRITE_TEXT_METRICS metrics{};layout->GetMetrics(&metrics);contextPreferredWidth=std::max(contextPreferredWidth,metrics.widthIncludingTrailingWhitespace+80);}}
+            // Measuring and placing are one step now: MeasureAndPlaceContext owns both.
         }
         else if (generic)
         {
@@ -706,6 +907,10 @@ struct NativePopup
             if(kind==L"@magic/quick-settings")height=std::min(620.f,(available.rcWork.bottom-available.rcWork.top)/scale-20);
             if(kind==L"@magic/system-tray")height=70+std::ceil(data.GetNamedArray(L"rows").Size()/5.f)*56;
         }
+        // The card's rows are laid out from its height, so settle the reader's height
+        // before BuildRows runs. Whatever does not fit is scrolled by the layout.
+        if(kind==L"@magic/user-menu")
+            height=UserMenuHeight(static_cast<float>(available.rcWork.bottom-available.rcWork.top),scale);
         if(generic&&!Flyout()&&!LocalDockPreview()&&!LocalTooltip()&&!LocalPicker()&&!LocalContext()&&kind!=L"@magic/apps-menu"&&!Modal()){
             BuildRows();float bottom=84;for(auto const &row:rows){if(kind==L"@magic/quick-settings"&&(row.id==L"power"||row.id==L"quick-back"||row.id==L"system-power"))continue;if(FunctionalPanel()&&functionalPinned.contains(row.id))continue;bottom=std::max(bottom,row.rect.bottom);}
             if(CenterPanel())bottom=std::max(bottom,functionalExtent);
@@ -716,6 +921,12 @@ struct NativePopup
             float limit=NativeGlassHeightLimit(width,scale,MaterialTier());
             if(limit>=220)height=std::min(height,limit);
         }
+        if(kind==L"@magic/user-menu"){
+            // Close-out only: the height was settled from the same contract before
+            // BuildRows, so this re-evaluates the identical expression and cannot
+            // introduce a different number.
+            height=UserMenuHeight(static_cast<float>(available.rcWork.bottom-available.rcWork.top),scale);
+        }
         if(!LocalPicker()){
             width=std::min(width,(available.rcWork.right-available.rcWork.left)/scale-20);
             height=std::min(height,(available.rcWork.bottom-available.rcWork.top)/scale-20);
@@ -724,20 +935,38 @@ struct NativePopup
         }
         if(kind==L"@magic/apps-menu"){width=std::min(824.f,(available.rcWork.right-available.rcWork.left)/scale-24);height=std::min(510.f,(available.rcWork.bottom-available.rcWork.top)/scale-24);if(Bool(data,L"fullscreen")){width=(available.rcWork.right-available.rcWork.left)/scale-24;height=(available.rcWork.bottom-available.rcWork.top)/scale-24;}}
         if(kind==L"@magic/apps-menu"){float fit=std::min(1.f,std::sqrt((8*1024*1024.f)/(width*height*scale*scale*4)));if(fit<1){width*=fit*.998f;height*=fit*.998f;}}
-        int pw = static_cast<int>(std::ceil(width * scale)), ph = static_cast<int>(std::ceil(height * scale));
+        MONITORINFO monitor{sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromPoint({ax, ay}, MONITOR_DEFAULTTONEAREST), &monitor);
+        int pw = 0, ph = 0, x = 0, y = 0;
+        if(LocalContext()){
+            // A cascade level's geometry belongs to one function, shared with the
+            // in-place re-layout: measure from this level's own packet, place it from
+            // the anchor that opened it, then widen the window by the same transparent
+            // gutter the paint uses. Leaving the gutter out is what let the region clip
+            // the right and bottom edges after an in-place re-layout.
+            auto frame=MeasureAndPlaceContext(monitor.rcWork);
+            x=frame.x;y=frame.y;pw=frame.width;ph=frame.height;
+        }
+        else{
+        pw=static_cast<int>(std::ceil(width * scale));ph=static_cast<int>(std::ceil(height * scale));
         auto offset = [](std::wstring const &align, int size) {
             return align == L"Center" ? size / 2 : align == L"End" ? size : 0;
         };
-        int x = ax - offset(Str(payload, L"alignX"), pw), y = ay - offset(Str(payload, L"alignY"), ph);
-        MONITORINFO monitor{sizeof(monitor)};
-        GetMonitorInfoW(MonitorFromPoint({ax, ay}, MONITOR_DEFAULTTONEAREST), &monitor);
+        x = ax - offset(Str(payload, L"alignX"), pw); y = ay - offset(Str(payload, L"alignY"), ph);
         if (pw > monitor.rcWork.right - monitor.rcWork.left || ph > monitor.rcWork.bottom - monitor.rcWork.top)
             throw std::runtime_error("Popup exceeds monitor work area; use compatible popup");
         pw = std::min(pw, static_cast<int>(monitor.rcWork.right - monitor.rcWork.left));
         ph = std::min(ph, static_cast<int>(monitor.rcWork.bottom - monitor.rcWork.top));
-        if(LocalContext()&&Num(payload,L"contextDepth")>0&&payload.HasKey(L"contextParentLeft")){
-            auto side=NativeContextMotion::ChildX(static_cast<int>(Num(payload,L"contextParentLeft")),static_cast<int>(Num(payload,L"contextParentRight")),pw,monitor.rcWork,scale);
-            ax=x=side.x;payload.Insert(L"contextFlipped",JsonValue::CreateBooleanValue(side.flipped));
+        if(kind==L"@magic/user-menu"){
+            // A screen coordinate wins when the reader set one; otherwise the card
+            // follows the avatar plus whatever nudge is configured. The clamp below
+            // still has the last word, so neither can leave the work area.
+            double fixedX=Num(app.model.preferences,L"accountCardX",-1);
+            double fixedY=Num(app.model.preferences,L"accountCardY",-1);
+            if(fixedX>=0)x=static_cast<int>(fixedX*scale);
+            else x+=static_cast<int>(Num(app.model.preferences,L"accountCardOffsetX")*scale);
+            if(fixedY>=0)y=static_cast<int>(fixedY*scale);
+            else y+=static_cast<int>(Num(app.model.preferences,L"accountCardOffsetY")*scale);
         }
         x = std::clamp(x, static_cast<int>(monitor.rcWork.left), static_cast<int>(monitor.rcWork.right) - pw);
         if(ToolbarDropdown()&&Str(payload,L"alignY")==L"Start")y=DropdownTop(ay,scale);
@@ -745,18 +974,8 @@ struct NativePopup
         centeredAtTrigger=false;motionAnchorX=-1;
         if(ToolbarDropdown()&&(Str(payload,L"alignY")==L"Start"||Str(payload,L"alignY")==L"End")) {auto placement=NativePlacePopup(ax,pw,monitor.rcWork,Str(payload,L"alignX"),scale);x=placement.x;centeredAtTrigger=placement.centered;motionAnchorX=placement.origin;}
         previewOrigin={static_cast<float>((Num(payload,L"previewAnchorX",ax)-x)/scale),Str(payload,L"alignY")==L"End"?height:Str(payload,L"alignY")==L"Start"?0.f:static_cast<float>((Num(payload,L"previewAnchorY",ay)-y)/scale)};
-        contentX=contentY=0;
-        if(AnimatedContext()){
-            contextChild=Num(payload,L"contextDepth")>0;contextFlipped=Bool(payload,L"contextFlipped");
-            auto placement=NativeContextMotion::Place({ax,ay},monitor.rcWork,pw,ph,scale,contextChild,contextFlipped,static_cast<float>(Num(payload,L"contextAnchorY",ay+22*scale)));
-            if(!DesktopContext()&&!contextChild){
-                // Keep the bar's existing centered/edge-clamped placement.
-                contextOrigin={std::clamp((ax-x)/scale,4.f,width-4),std::clamp((ay-y)/scale,4.f,height-4)};
-            }else{x=placement.x;y=placement.y;contextOrigin=placement.origin;}
-            // Transparent overshoot allowance is not a second material/background.
-            contentX=NativeContextMotion::Gutter(width);contentY=NativeContextMotion::Gutter(height);
-            x-=static_cast<int>(contentX*scale);y-=static_cast<int>(contentY*scale);pw+=static_cast<int>(2*contentX*scale);ph+=static_cast<int>(2*contentY*scale);
         }
+        if(!LocalContext())contentX=contentY=0;
         if(Modal()){
             int fullW=monitor.rcWork.right-monitor.rcWork.left,fullH=monitor.rcWork.bottom-monitor.rcWork.top;
             contentX=(fullW-pw)/2.f/scale;contentY=(fullH-ph)/2.f/scale;
@@ -768,7 +987,7 @@ struct NativePopup
         // User32 clips ordinary popups; modal scrims use a color visual instead
         // of allocating a full-screen bitmap.
         HRGN region =
-            CreateRoundRectRgn(0, 0, pw + 1, ph + 1, static_cast<int>(2*(LocalTooltip()||LocalDockPreview()||LocalContext()&&Str(Data(),L"menuStyle")==L"toolbar"?10.f:NativeMetrics::FloatingRadius) * scale), static_cast<int>(2*(LocalTooltip()||LocalDockPreview()||LocalContext()&&Str(Data(),L"menuStyle")==L"toolbar"?10.f:NativeMetrics::FloatingRadius) * scale));
+            CreateRoundRectRgn(0, 0, pw + 1, ph + 1, static_cast<int>(2*MaterialRadius() * scale), static_cast<int>(2*MaterialRadius() * scale));
         if(Modal()||AnimatedContext()){DeleteObject(region);SetWindowRgn(hwnd,nullptr,FALSE);}
         else if (!SetWindowRgn(hwnd, region, FALSE))DeleteObject(region);
         NativeLayerPosition(hwnd, x, y, pw, ph, SWP_NOACTIVATE);
@@ -793,7 +1012,12 @@ struct NativePopup
                 SendMessageW(tooltip,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tool));SendMessageW(tooltip,WM_SETFONT,reinterpret_cast<WPARAM>(inputFont),FALSE);SendMessageW(tooltip,TTM_SETMAXTIPWIDTH,0,300);}
         }
         if(LocalDockPreview()&&NativeMotion(app.model)&&Bool(data,L"previewAnimate",true))popupRoot.Opacity(0);
-        Draw();if(!LocalDockPreview())FadeIn();
+        Draw();
+        // The card can open without motion; a panel that slides and fades under the
+        // cursor is a taste, and the switch has to reach the one control that owns it.
+        bool quietCard=kind==L"@magic/user-menu"&&!Bool(app.model.preferences,L"accountCardMotion",true);
+        if(quietCard){ResetPanelMotion();if(popupRoot)popupRoot.Opacity(1);if(visual)visual.Opacity(1);}
+        else if(!LocalDockPreview())FadeIn();
         // A fixture measures painting/lifetime without borrowing user focus.
         // Production still requires actual foreground activation before acceptance.
         ShowWindow(hwnd, (app.popupCycles || passive || measurement) ? SW_SHOWNOACTIVATE : SW_SHOW);
@@ -844,6 +1068,17 @@ struct NativePopup
         if((kind==L"@magic/system-tray"||kind==L"@magic/apps-menu")&&pressedTray>=0){if(GetCapture()==hwnd)ReleaseCapture();pressedTray=-1;trayDragging=false;}
         if (!visible || dismissing || Str(value, L"token") != token)
             return;
+        // A hold names the window that must not dismiss this popup. It is set before
+        // that window can take focus and cleared when the popup or the panel goes away.
+        if(value.HasKey(L"holdWindow")||value.HasKey(L"holdPid")){
+            if(value.HasKey(L"holdWindow"))holdWindow=reinterpret_cast<HWND>(static_cast<UINT_PTR>(Num(value,L"holdWindow")));
+            if(value.HasKey(L"holdPid"))holdPid=static_cast<DWORD>(Num(value,L"holdPid"));
+            if(!value.HasKey(L"data"))return;
+        }
+        // The tuning panel's unsaved copy rides with the card's own refresh, so the
+        // card is measured from what the reader just set, not from the last file write.
+        if(auto offered=value.TryLookup(L"preferences");offered&&offered.ValueType()==JsonValueType::Object)
+            app.model.preferences=offered.GetObject();
         if(!resizePreparing&&TryResizeUpdate(value))return;
         bool previousPower=PowerView(),previousFullscreen=Bool(Data(),L"fullscreen");
         bool enteringAllApps=kind==L"@magic/apps-menu"&&Str(Data(),L"appsView")!=L"all"&&Str(value.GetNamedObject(L"data"),L"appsView")==L"all";
@@ -857,7 +1092,16 @@ struct NativePopup
             MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);float scale=dpi/96;
             width=std::min(Bool(data,L"fullscreen")?100000.f:760.f,(monitor.rcWork.right-monitor.rcWork.left)/scale-20);height=std::min(Bool(data,L"fullscreen")?100000.f:520.f,(monitor.rcWork.bottom-monitor.rcWork.top)/scale-20);
             float fit=std::min(1.f,std::sqrt((8*1024*1024.f)/(width*height*scale*scale*4)));if(fit<1){width*=fit*.998f;height*=fit*.998f;}
-            int w=static_cast<int>(std::ceil(width*scale)),h=static_cast<int>(std::ceil(height*scale));NativeLayerPosition(hwnd,monitor.rcWork.left+(monitor.rcWork.right-monitor.rcWork.left-w)/2,monitor.rcWork.top+(monitor.rcWork.bottom-monitor.rcWork.top-h)/2,w,h,SWP_NOACTIVATE);auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(2*NativeMetrics::FloatingRadius*scale),static_cast<int>(2*NativeMetrics::FloatingRadius*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);Release();
+            int w=static_cast<int>(std::ceil(width*scale)),h=static_cast<int>(std::ceil(height*scale));NativeLayerPosition(hwnd,monitor.rcWork.left+(monitor.rcWork.right-monitor.rcWork.left-w)/2,monitor.rcWork.top+(monitor.rcWork.bottom-monitor.rcWork.top-h)/2,w,h,SWP_NOACTIVATE);auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(2*MaterialRadius()*scale),static_cast<int>(2*MaterialRadius()*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);Release();
+        }
+        // The tuning panel edits the card's shape while the card stands, so the same
+        // height contract Show() runs has to run here too. Measure before BuildRows so
+        // the row window matches the frame that is about to be painted.
+        if(kind==L"@magic/user-menu"){
+            MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);float scale=dpi/96;
+            double cardWidth=Num(app.model.preferences,L"accountCardWidth");
+            if(cardWidth>=260&&cardWidth<=560)width=static_cast<float>(cardWidth);
+            height=UserMenuHeight(static_cast<float>(monitor.rcWork.bottom-monitor.rcWork.top),scale);
         }
         auto focused = focus >= 0 && focus < static_cast<int>(rows.size()) ? rows[focus].key : L"";
         BuildRows();
@@ -868,6 +1112,9 @@ struct NativePopup
                 int y=UpdatedPanelTop(bounds,monitor.rcWork,h,scale);NativeLayerPosition(hwnd,bounds.left,y,w,h,SWP_NOACTIVATE);
                 if(popupRoot)popupRoot.Size({static_cast<float>(w),static_cast<float>(h)});if(popupScene)popupScene.Size({static_cast<float>(w),static_cast<float>(h)});auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(32*scale),static_cast<int>(32*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);Release(true);BuildRows();}
         }
+        // Close-out with the laid-out content: the card's rows are laid out from its
+        // height, so the frame follows the content it actually needed.
+        if(kind==L"@magic/user-menu")ReframeCard();
         for (int i = 0; i < static_cast<int>(rows.size()); i++)
             if (rows[i].key == focused)
                 focus = i;
@@ -1046,7 +1293,10 @@ struct NativePopup
         }
         if(row.id.starts_with(L"wifi-group:")){networkExpanded=networkExpanded==row.id?L"":row.id;RelayoutDisclosure();return;}
         if(row.action==L"audio-advanced"){audioAdvanced=!audioAdvanced;RelayoutDisclosure();return;}
-        if (generic&&!(kind==L"@magic/power-menu"&&action!=L"native-command"))
+        // Only a row whose action is the opaque native-command token travels the
+        // command table. power-menu and user-menu rows name their action directly and
+        // fall through to the confirmation/emit path below.
+        if (generic && action == L"native-command")
         {
             if (row.control != L"text" && row.control != L"password" && row.control != L"range")
                 Command(row);
@@ -1138,7 +1388,7 @@ struct NativePopup
         D2D1_RECT_F viewport{6,6,width-6,height-6};
         if(LocalPicker()&&r.action==L"pick")viewport={18,100,width*.68f-12,height-44};
         else if(FunctionalPanel()&&!functionalPinned.contains(r.id))viewport={14,functionalTop,width-14,functionalBottom};
-        else if(!Flyout()&&!LocalContext()&&!LocalPicker()&&!LocalDockPreview()&&generic&&r.rect.top>=ContentTop())viewport={14,ContentTop(),width-14,height-16};
+        else if(!Flyout()&&!LocalContext()&&!LocalPicker()&&!LocalDockPreview()&&generic&&(r.rect.top>=ContentTop()||kind==L"@magic/user-menu"))viewport={14,ContentTop(),width-14,height-16};
         bool enabled=r.enabled&&!r.offscreen&&r.control!=L"label"&&r.control!=L"separator";
         return NativeRegion(r.rect,viewport,r.action==L"pick"||r.control==L"tray"?NativeMetrics::PanelRadius:NativeMetrics::ControlRadius,enabled);
     }
@@ -1224,10 +1474,15 @@ struct NativePopup
         }else if (!CenterPanel() && (generic || kind == L"@magic/keyboard-selector") && focus >= 0 &&
             (generic || rows[focus].action == L"keyboard-select"))
         {
-            if (focus < scroll)
-                scroll = focus;
-            if (focus >= scroll + (generic ? visibleRows : 6))
-                scroll = focus - (generic ? visibleRows : 6) + 1;
+            // The card's rows are 30-52 DIP tall, so its window is not visibleRows of
+            // 56; LayoutPreview70 clamps scroll against the real content instead.
+            if(kind!=L"@magic/user-menu"){
+                if (focus < scroll)
+                    scroll = focus;
+                if (focus >= scroll + (generic ? visibleRows : 6))
+                    scroll = focus - (generic ? visibleRows : 6) + 1;
+            }else if(focus<scroll)scroll=focus;
+            else if(rows[focus].rect.bottom>height-18)scroll=focus;
             BuildRows();
         }
         Draw();
@@ -1386,7 +1641,14 @@ struct NativePopup
                 break;
             case WM_MOUSEWHEEL:
                 if(self->LocalDockPreview()){self->previewScroll-=GET_WHEEL_DELTA_WPARAM(w)/120.f*96;self->BuildRows();self->Draw();return 0;}
-                if(self->LocalContext())return 0;
+                if(self->LocalContext()){
+                    if(self->ContextOverflows()){
+                        float step=GET_WHEEL_DELTA_WPARAM(w)>0?-1.f:1.f;
+                        self->contextScroll=std::clamp(self->contextScroll+step*36.f,0.f,std::max(0.f,self->contextTotal-self->ContextViewport()));
+                        self->BuildRows();self->Draw();
+                    }
+                    return 0;
+                }
                 if (self->generic || self->kind == L"@magic/keyboard-selector")
                 {
                     self->scroll += (GET_WHEEL_DELTA_WPARAM(w)>0?-1:1)*(self->LocalPicker()?self->PickerColumns():1);
@@ -1394,10 +1656,20 @@ struct NativePopup
                     self->Draw();
                 }
                 return 0;
-            case WM_ACTIVATE:
-                if (LOWORD(w) == WA_INACTIVE && !self->closing&&!self->contextMenuOpen && !(self->contextFamily&&self->contextFamily(reinterpret_cast<HWND>(l))) && reinterpret_cast<HWND>(l) != self->hwnd &&
-                    !IsChild(self->hwnd, reinterpret_cast<HWND>(l))&&!self->InputFamily(reinterpret_cast<HWND>(l)))
-                    self->Hide();
+            case WM_ACTIVATE: {
+                // A standing hold means the tuning panel borrowed the foreground, so
+                // losing focus is not the reader leaving. Identifying the focus window
+                // is not an option: on 2026-11-10 17:26:22.081 the card held
+                // holdPid=26116 / holdWindow=0000000000282CA8, yet this message carried
+                // focusPid=0, so the panel-process test never matched and the card hid
+                // under the reader's slider. Only the hold's own presence is
+                // trustworthy; popup-hide, WM_CLOSE, session lock, a replacing popup and
+                // the panel's CloseCard remain the closers.
+                HWND next=reinterpret_cast<HWND>(l);
+                bool held=self->holdPid!=0||self->holdWindow!=nullptr;
+                bool willHide=LOWORD(w) == WA_INACTIVE && !self->closing&&!self->contextMenuOpen && !held && !(self->contextFamily&&self->contextFamily(next)) && next != self->hwnd && !IsChild(self->hwnd, next)&&!self->InputFamily(next);
+                if(willHide)self->Hide();
+                }
                 return 0;
             case WM_CLOSE:
                 self->Hide();

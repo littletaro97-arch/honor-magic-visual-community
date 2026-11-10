@@ -47,7 +47,7 @@ inline void NativePopup::PaintPicker(ID2D1DeviceContext *c)
         for(auto const &row:rows){p.Fill(row.rect,soft,6);p.Text(row.label,row.rect,13,row.id==L"picker-uninstall"?p.theme.Danger():ink,500,DWRITE_TEXT_ALIGNMENT_CENTER);}
         return;
     }
-    float split=width*.68f;if(!NativeLowPower(app.model))p.Shadow({10,10,width-10,height-10},NativeMetrics::FloatingRadius);p.Material({10,10,width-10,height-10},NativeMaterial::Panel,Glass(),NativeMetrics::FloatingRadius);
+    float split=width*.68f;if(!NativeLowPower(app.model))p.Shadow({10,10,width-10,height-10},NativeMetrics::FloatingRadius,NativeMetrics::PopupInset);p.Material({10,10,width-10,height-10},NativeMaterial::Panel,Glass(),NativeMetrics::FloatingRadius);
     p.Fill({split,62,width-10,height-30},rail,0);p.Line(18,62,width-18,62,line);p.Line(split,62,split,height-30,line);
     p.Text(L"新建卡片",{26,18,width-62,40},17,ink,600);p.Text(L"系统卡片与我的卡片",{26,40,width-62,56},11,muted);
     p.Text(L"系统卡片",{24,74,split-24,98},13,ink,600);p.Text(L"预览",{split+18,72,width-24,94},11,muted);

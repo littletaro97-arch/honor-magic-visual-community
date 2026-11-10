@@ -280,7 +280,12 @@ void ConfigurationProvider::Validate(JsonObject const &config)
         Keys(appearance, {L"edge", L"enabled", L"autoHide", L"outerMargin", L"innerPadding", L"showDelayMs",
                           L"hideDelayMs", L"itemSize", L"iconSize", L"itemGap", L"widthMode", L"middleClickAction",
                           L"pinnedVisibility", L"runningVisibility", L"attentionReveal", L"showEndTask",
-                          L"showInstanceCount", L"showWindowTitle", L"splitWindows"});
+                          L"showInstanceCount", L"showWindowTitle", L"splitWindows",
+                          // Appearance surface (accepted now, consumed by the renderer in P1):
+                          // material = solid|acrylic|mica|glass|liquid
+                          // fullscreenMaterial overrides material while a fullscreen window is focused.
+                          L"material", L"tintColor", L"tintOpacity", L"blurRadius",
+                          L"fullscreenMaterial", L"fullscreenColor", L"cornerRadius"});
         StyleValue(appearance, 0);
     }
     auto preferences = config.GetNamedObject(L"preferences");

@@ -12,6 +12,27 @@ internal sealed partial class NativeSystemUiSession
     private void LoadPreferences()
     {
         JsonDocument? Read(string name) { string path = Path.Combine(deployment.DataDirectory, name); if (!File.Exists(path)) return null; if (new FileInfo(path).Length > 262144 || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("Independent preferences exceed bounds or are a link."); return JsonDocument.Parse(File.ReadAllBytes(path), new JsonDocumentOptions { MaxDepth = 8 }); }
+        using (var brands = Read("brand-icons.json")) if (brands is not null) foreach (var item in brands.RootElement.EnumerateObject())
+        {
+            if (brandIcons.Count >= 256 || item.Name.Length > 96) throw new InvalidDataException("Brand icon bound.");
+            // Older files stored a bare slug; keep reading them.
+            if (item.Value.ValueKind == JsonValueKind.String)
+            {
+                string legacy = item.Value.GetString() ?? "";
+                if (legacy.Length > 64) throw new InvalidDataException("Brand icon bound.");
+                brandIcons.Add(item.Name, new BrandOverride(legacy, false, "brand", "", "mono", ""));
+                continue;
+            }
+            string? icon = item.Value.TryGetProperty("Icon", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            if (icon is { Length: > 64 }) throw new InvalidDataException("Brand icon bound.");
+            bool hidden = item.Value.TryGetProperty("IconHidden", out var flag) && flag.ValueKind == JsonValueKind.True;
+            string label = item.Value.TryGetProperty("Label", out var mode) && mode.ValueKind == JsonValueKind.String ? mode.GetString() ?? "brand" : "brand";
+            string text = item.Value.TryGetProperty("Text", out var typed) && typed.ValueKind == JsonValueKind.String ? typed.GetString() ?? "" : "";
+            if (text.Length > 32) throw new InvalidDataException("Brand wordmark bound.");
+            string style = item.Value.TryGetProperty("Style", out var paint) && paint.ValueKind == JsonValueKind.String ? paint.GetString() ?? "mono" : "mono";
+            string device = item.Value.TryGetProperty("Device", out var shape) && shape.ValueKind == JsonValueKind.String ? shape.GetString() ?? "" : "";
+            brandIcons.Add(item.Name, new BrandOverride(icon, hidden, label, text, style == "color" ? "color" : "mono", device == "desktop" ? "desktop" : ""));
+        }
         using (var icons = Read("custom-icons.json")) if (icons is not null) foreach (var item in icons.RootElement.EnumerateObject()) { if (customIcons.Count >= 256 || item.Name.Length > 96 || item.Value.GetString()!.Length > 32768) throw new InvalidDataException("Custom icon bound."); customIcons.Add(item.Name, item.Value.GetString()!); }
         try{notificationQuiet=NativeNotificationPreferences.Read(deployment.DataDirectory);}catch(Exception e)when(e is IOException or InvalidDataException or JsonException or UnauthorizedAccessException or InvalidOperationException or KeyNotFoundException or FormatException){notificationQuiet=false;log("notification_preference_unavailable",new{type=e.GetType().Name});}
         using (var tray = Read("tray-preferences.json")) if (tray is not null) { foreach (var item in tray.RootElement.GetProperty("promoted").EnumerateObject()) { if (trayPromoted.Count >= 256 || item.Name.Length > 33280) throw new InvalidDataException("Tray preference bound."); trayPromoted.Add(item.Name, item.Value.GetBoolean()); } foreach (var item in Array(tray.RootElement, "order")) { if (trayOrder.Count >= 256 || item.GetString()!.Length > 33280) throw new InvalidDataException("Tray order bound."); trayOrder.Add(item.GetString()!); } }

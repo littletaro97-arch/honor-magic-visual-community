@@ -609,7 +609,11 @@ static BOOL CALLBACK Monitor(HMONITOR monitor, HDC, LPRECT, LPARAM list)
     Number(o, L"top", info.rcMonitor.top);
     Number(o, L"width", info.rcMonitor.right - info.rcMonitor.left);
     Number(o, L"height", info.rcMonitor.bottom - info.rcMonitor.top);
+    // Only workTop/workBottom used to be exported, so a taskbar docked left or
+    // right was invisible to the renderer. Export all four edges.
+    Number(o, L"workLeft", info.rcWork.left);
     Number(o, L"workTop", info.rcWork.top);
+    Number(o, L"workRight", info.rcWork.right);
     Number(o, L"workBottom", info.rcWork.bottom);
     UINT x = 96, y = 96;
     GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &x, &y);

@@ -19,14 +19,18 @@ public sealed class CommunitySettingsWindow : CommunityWindow
     private readonly bool gallery;
     private Brush ink,muted,surface,back;
     private Border? sidebar;private NativePowerSubscription? powerSubscription;
+    private StartupRegistration.Registration startup=StartupRegistration.Registration.Unknown;
+    private string startupDetail=string.Empty;
+    private bool startupQueried,startupBusy;
     private string page="桌面";
+    private IReadOnlyList<BarModuleState>? modules;private bool moduleQueried,moduleBusy;private string? moduleError;
     public CommunitySettingsWindow(AppController controller,bool? theme=null)
     {
         this.controller=controller;gallery=theme.HasValue;preferences=CommunityPreferences.Load(controller.Root);
         var palette=new NativeWpfTheme(theme);dark=palette.Dark;ink=palette.Ink;muted=palette.Muted;surface=palette.WindowCard;back=palette.MaterialBackground(false);palette.Apply(this);
         Title="";System.Windows.Automation.AutomationProperties.SetName(this,"magic 视界社区版设置");Width=880;Height=624;MinWidth=660;MinHeight=440;FontFamily=CommunityFont.Family;FontSize=12;Foreground=ink;Background=Brushes.Transparent;WindowStartupLocation=WindowStartupLocation.CenterScreen;
         var root=new DockPanel{Background=back};Content=root;var side=new Border{Width=190,Background=palette.WindowSidebar,BorderBrush=palette.Divider,BorderThickness=new(0,0,1,0),Padding=new(10,18,10,10)};DockPanel.SetDock(side,Dock.Left);root.Children.Add(side);sidebar=side;side.Child=navigation;
-        foreach(var label in new[]{"桌面","外观","省电","账号","关于"}){var button=new Button{Content=label,Height=36,HorizontalContentAlignment=HorizontalAlignment.Left,Padding=new(16,0,0,0),Margin=new(0,2,0,2),BorderThickness=new(0)};var template=new ControlTemplate(typeof(Button));var shape=new FrameworkElementFactory(typeof(Border));shape.SetValue(Border.CornerRadiusProperty,new CornerRadius(NativeWpfTheme.ControlRadius));shape.SetBinding(Border.BackgroundProperty,new System.Windows.Data.Binding("Background"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});var content=new FrameworkElementFactory(typeof(ContentPresenter));content.SetBinding(ContentPresenter.ContentProperty,new System.Windows.Data.Binding("Content"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});content.SetValue(FrameworkElement.VerticalAlignmentProperty,VerticalAlignment.Center);content.SetValue(FrameworkElement.MarginProperty,new Thickness(16,0,0,0));shape.AppendChild(content);template.VisualTree=shape;button.Template=template;
+        foreach(var label in new[]{"桌面","外观","模块","省电","账号","关于"}){var button=new Button{Content=label,Height=36,HorizontalContentAlignment=HorizontalAlignment.Left,Padding=new(16,0,0,0),Margin=new(0,2,0,2),BorderThickness=new(0)};var template=new ControlTemplate(typeof(Button));var shape=new FrameworkElementFactory(typeof(Border));shape.SetValue(Border.CornerRadiusProperty,new CornerRadius(NativeWpfTheme.ControlRadius));shape.SetBinding(Border.BackgroundProperty,new System.Windows.Data.Binding("Background"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});var content=new FrameworkElementFactory(typeof(ContentPresenter));content.SetBinding(ContentPresenter.ContentProperty,new System.Windows.Data.Binding("Content"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});content.SetValue(FrameworkElement.VerticalAlignmentProperty,VerticalAlignment.Center);content.SetValue(FrameworkElement.MarginProperty,new Thickness(16,0,0,0));shape.AppendChild(content);template.VisualTree=shape;button.Template=template;
             button.Click+=(_,_)=>Navigate(label);navigation.Children.Add(button);}
         var scroll=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Visible,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled,Padding=new(30,26,26,26),Content=pane};
         scroll.Resources.Add(typeof(ScrollBar),SettingsScrollBarStyle());root.Children.Add(scroll);
@@ -97,7 +101,24 @@ public sealed class CommunitySettingsWindow : CommunityWindow
         var template=new ControlTemplate(typeof(ToggleButton));var body=new FrameworkElementFactory(typeof(Border));body.Name="Track";body.SetValue(Border.CornerRadiusProperty,new CornerRadius(12));body.SetValue(Border.BackgroundProperty,muted);
         var thumb=new FrameworkElementFactory(typeof(Border));thumb.Name="Thumb";thumb.SetValue(FrameworkElement.WidthProperty,19d);thumb.SetValue(FrameworkElement.HeightProperty,19d);thumb.SetValue(Border.CornerRadiusProperty,new CornerRadius(10));thumb.SetValue(Border.BackgroundProperty,Brushes.White);thumb.SetValue(FrameworkElement.MarginProperty,new Thickness(2));thumb.SetValue(FrameworkElement.HorizontalAlignmentProperty,HorizontalAlignment.Left);body.AppendChild(thumb);template.VisualTree=body;
         var trigger=new Trigger{Property=ToggleButton.IsCheckedProperty,Value=true};trigger.Setters.Add(new Setter(Border.BackgroundProperty,SystemColors.HighlightBrush,"Track"));trigger.Setters.Add(new Setter(FrameworkElement.HorizontalAlignmentProperty,HorizontalAlignment.Right,"Thumb"));template.Triggers.Add(trigger);t.Template=template;
-        if(set is not null)t.Click+=(_,_)=>{try{set(t.IsChecked==true);preferences.Save(controller);Render();}catch(Exception ex){MessageBox.Show(this,ex.Message,"设置未保存");Render();}};return t;
+        if(set is not null)t.Click+=(_,_)=>{try{set(t.IsChecked==true);preferences.Save(controller);_ = controller.RefreshPreferences?.Invoke(default);Render();}catch(Exception ex){MessageBox.Show(this,ex.Message,"设置未保存");Render();}};return t;
+    }
+    // The bar paints one of three things once an application covers the work area. The
+    // original goes black; the glass it replaced is still one pick away.
+    private ComboBox BackdropPicker()
+    {
+        var combo=HonorIconSettingsControl.Create(dark);
+        var choices=new (string Value,string Label)[]{("black","变黑"),("acrylic","毛玻璃"),("transparent","保持透明")};
+        foreach(var (value,label) in choices)combo.Items.Add(new ComboBoxItem{Content=label,Tag=value});
+        int selected=Array.FindIndex(choices,x=>x.Value==preferences.CoveredBackdrop);combo.SelectedIndex=selected<0?0:selected;
+        combo.IsEnabled=!controller.Store.ReadOnly;
+        combo.SelectionChanged+=(_,_)=>{
+            if(combo.SelectedItem is not ComboBoxItem item||item.Tag is not string value||value==preferences.CoveredBackdrop)return;
+            string previous=preferences.CoveredBackdrop;
+            try{preferences.CoveredBackdrop=value;preferences.Save(controller);_ = controller.RefreshPreferences?.Invoke(default);}catch(Exception ex){preferences.CoveredBackdrop=previous;MessageBox.Show(this,ex.Message,"设置未保存");}
+            Render();
+        };
+        return combo;
     }
     private bool keyboardBusy;
     private ToggleButton KeyboardToggle(bool forChord)
@@ -116,6 +137,35 @@ public sealed class CommunitySettingsWindow : CommunityWindow
         };
         return button;
     }
+    private string StartupHint()=>startup switch
+    {
+        StartupRegistration.Registration.Enabled=>"登录后自动进入顶栏与桌面组件",
+        StartupRegistration.Registration.EnabledByPolicy=>"登录后自动进入，由组织策略设定",
+        StartupRegistration.Registration.Disabled=>"登录后不自动进入，仍可从开始菜单打开",
+        StartupRegistration.Registration.DisabledByUser=>"已被 Windows 关闭，重新开启需在系统提示中允许",
+        StartupRegistration.Registration.DisabledByPolicy=>"由组织策略禁用，无法在此更改",
+        _=>startupDetail.Length>0?$"暂时无法读取（{startupDetail}）":"仅安装版可设置，当前状态未知"
+    };
+    private ToggleButton StartupToggle()
+    {
+        var button=Toggle(StartupRegistration.IsOn(startup),null);
+        button.IsEnabled=!gallery&&!startupBusy&&!controller.Store.ReadOnly&&StartupRegistration.Toggleable(startup);
+        button.Click+=(_,_)=>ApplyStartup(button.IsChecked==true);
+        return button;
+    }
+    private async void ApplyStartup(bool enabled)
+    {
+        if(startupBusy)return;
+        startupBusy=true;Render();
+        try
+        {
+            var probe=await System.Threading.Tasks.Task.Run(()=>StartupRegistration.Apply(enabled));
+            startup=probe.State;startupDetail=probe.Detail;
+            if(enabled&&!StartupRegistration.IsOn(startup))MessageBox.Show(this,$"Windows 没有允许本应用开机启动（{StartupRegistration.Describe(startup)}）。可稍后在「任务管理器 › 启动应用」中手动开启。","开机启动未开启");
+        }
+        catch(Exception exception) when(exception is not OutOfMemoryException){MessageBox.Show(this,exception.Message,"开机启动未保存");}
+        finally{startupBusy=false;Render();}
+    }
     private void Link(StackPanel group,string label,Action action)
     {
         if(group.Children.Count>0)group.Children.Add(new Border{Height=1,Background=muted,Opacity=.15});
@@ -132,6 +182,36 @@ public sealed class CommunitySettingsWindow : CommunityWindow
         page=destination;Render();
     }
     private static void Open(string target)=>Process.Start(new ProcessStartInfo(target){UseShellExecute=true});
+    private void QueryModules()
+    {
+        moduleQueried=true;moduleError=null;
+        if(controller.ReadBarModules is not {} read){modules=null;moduleError="顶栏尚未启动，暂时读不到模块列表。";return;}
+        _=QueryModulesAsync(read);
+    }
+    private async Task QueryModulesAsync(Func<CancellationToken,Task<IReadOnlyList<BarModuleState>>> read)
+    {
+        try{modules=await read(CancellationToken.None);moduleError=null;}
+        catch(Exception error) when(error is not OutOfMemoryException){modules=null;moduleError="暂时无法读取模块列表（"+error.Message+"）";}
+        if(!Dispatcher.HasShutdownStarted)_=Dispatcher.BeginInvoke(new Action(Render));
+    }
+    private ToggleButton ModuleToggle(bool value,BarModuleState module,string surface,bool editable)
+    {
+        var button=Toggle(value,null);
+        button.IsEnabled=editable&&!moduleBusy;
+        ToolTipService.SetToolTip(button,module.Id);
+        button.Click+=async(_,_)=>{
+            if(moduleBusy||controller.SetBarModule is not {} set){Render();return;}
+            bool wanted=button.IsChecked==true;
+            // Show the new state at once; the reload below restores the truth if it fails.
+            if(modules is not null)modules=modules.Select(m=>m.Id!=module.Id?m:surface=="toolbar"?m with{Toolbar=wanted}:m with{Dock=wanted}).ToList();
+            moduleBusy=true;Render();
+            try{await set(surface,module.Id,wanted,CancellationToken.None);}
+            catch(Exception error) when(error is not OutOfMemoryException){MessageBox.Show(this,error.Message,"模块未保存");}
+            finally{moduleBusy=false;}
+            moduleQueried=false;QueryModules();Render();
+        };
+        return button;
+    }
     private void Render()
     {
         ApplyMaterial();
@@ -139,17 +219,28 @@ public sealed class CommunitySettingsWindow : CommunityWindow
         pane.Children.Add(new TextBlock{Text=page,FontSize=22,FontWeight=FontWeights.SemiBold,Foreground=ink,Margin=new(0,0,0,4)});
         if(page=="桌面"){
             var board=controller.State.Boards.FirstOrDefault(b=>controller.Screens.Any(s=>s.Id==b.Id));var g=Group("布局");Row(g,"网格",board?.Grid is {} grid?$"{grid.Rows} 行 × {grid.Columns} 列":"尚未接管桌面");Row(g,"容量",board?.Grid is {} grid2?$"{grid2.Placements.Values.Sum(r=>r.W*r.H)} / {grid2.Columns*grid2.Rows}":"—");
+            if(!startupQueried){startupQueried=true;var probe=StartupRegistration.Query();startup=probe.State;startupDetail=probe.Detail;}
+            var launch=Group("启动");Row(launch,"登录 Windows 后自动启动",subtitle:StartupHint(),control:StartupToggle());
             var pages=Group("分页");Row(pages,"显示页码条",subtitle:"显示在顶栏",control:Toggle(preferences.ShowPages,v=>preferences.ShowPages=v));Row(pages,"闲置后淡出",subtitle:"2 秒后淡出，靠近恢复",control:Toggle(preferences.FadePages,v=>preferences.FadePages=v,preferences.ShowPages));if(!preferences.ShowPages){pages.Children[^1].Opacity=.42;pages.Children[^1].IsEnabled=false;ToolTipService.SetToolTip(pages.Children[^1],"需先打开「显示页码条」");ToolTipService.SetShowOnDisabled(pages.Children[^1],true);}
             var wallpaper=Group("壁纸");Link(wallpaper,"副屏壁纸保护",()=>new SecondaryWallpaperWindow(controller){Owner=this}.Show());
             var keyboard=Group("快捷键");
             Row(keyboard,"单按 Win 打开社区版开始菜单",subtitle:"关闭时打开 Windows 开始菜单",control:KeyboardToggle(false));
             Row(keyboard,"Win+A 打开社区版控制中心",subtitle:"关闭时打开 Windows 快速设置",control:KeyboardToggle(true));
-            var window=Group("窗口");Row(window,"窗口动画",control:Toggle(preferences.WindowAnimations,v=>preferences.WindowAnimations=v));Row(window,"大文件夹动效",control:Toggle(preferences.FolderAnimations,v=>preferences.FolderAnimations=v));Row(window,"Dock 消散动画",subtitle:"自动隐藏时原地消散，跟随窗口动画及节电设置",control:Toggle(preferences.DockDissolve,v=>preferences.DockDissolve=v));
+            var window=Group("窗口");Row(window,"窗口动画",control:Toggle(preferences.WindowAnimations,v=>preferences.WindowAnimations=v));Row(window,"大文件夹动效",control:Toggle(preferences.FolderAnimations,v=>preferences.FolderAnimations=v));Row(window,"Dock 消散动画",subtitle:"自动隐藏时原地消散，跟随窗口动画及节电设置",control:Toggle(preferences.DockDissolve,v=>preferences.DockDissolve=v));Row(window,"顶栏消散动画",subtitle:"拖动窗口到顶部时顶栏原地消散；关掉后直接隐藏，没有动画",control:Toggle(preferences.ToolbarDissolve,v=>preferences.ToolbarDissolve=v));
         }else if(page=="外观"){
             var theme=Group("显示");Row(theme,"深色模式",subtitle:"与 Windows 及控制中心的显示与亮度同步",control:Toggle(NativeWpfTheme.Personalization("AppsUseLightTheme",1)==0,v=>NativeAppearanceSettings.SetDark(v)));
-            Row(theme,"透明顶栏",subtitle:"无全屏应用时移除底色；浅色系统用白字，深色系统用黑字",control:Toggle(preferences.TransparentToolbar,v=>preferences.TransparentToolbar=v));
+            Row(theme,"桌面透明",subtitle:"没有全屏应用时不留底色，直接看壁纸；字色跟随系统深/浅色",control:Toggle(preferences.TransparentToolbar,v=>preferences.TransparentToolbar=v));
             if(preferences.TransparentToolbar)
                 Row(theme,"过渡遮罩",subtitle:"顶部轻度着色并向下渐隐，随系统深浅色切换",control:Toggle(preferences.TransparentToolbarMask,v=>preferences.TransparentToolbarMask=v));
+            Row(theme,"全屏应用时",subtitle:"应用占满屏幕时顶上那条的底色，默认与荣耀一致变黑",control:BackdropPicker());
+            Row(theme,"看得清的图标",subtitle:"顶上变黑时，本身是深色的彩色徽标换成白色单色，本身是深色的托盘小图标垫一层浅底；浅色栏上反过来。关掉就完全按原样绘制",control:Toggle(preferences.AutoContrast,v=>preferences.AutoContrast=v));
+            // The account card is tuned from inside the card itself, not from here.
+            // Two switches rather than one three-way control: the same pair of booleans
+            // the renderer reads, so nothing has to be translated in between.
+            var hints=Group("提示卡片");
+            Row(hints,"亮度变化提示",subtitle:"关掉后调亮度不再弹卡片",control:Toggle(preferences.BrightnessHints,v=>preferences.BrightnessHints=v));
+            Row(hints,"跟随系统全部变化",subtitle:"其他程序或亮度键引起的改动也弹；开了自适应亮度的机器会跟着环境光弹",control:Toggle(preferences.BrightnessFollowSystem,v=>preferences.BrightnessFollowSystem=v,preferences.BrightnessHints));
+            if(!preferences.BrightnessHints){hints.Children[^1].Opacity=.42;hints.Children[^1].IsEnabled=false;ToolTipService.SetToolTip(hints.Children[^1],"需先打开「亮度变化提示」");ToolTipService.SetShowOnDisabled(hints.Children[^1],true);}
             var names=Group("图标名称显示");
             Row(names,"大文件夹图标名称显示",subtitle:"开启后，收起的大文件夹也显示内部图标名称",control:Toggle(preferences.CollapsedFolderIconNames,v=>preferences.CollapsedFolderIconNames=v));
             Row(names,"桌面图标名称显示",subtitle:"关闭后，仅鼠标悬停时显示桌面图标名称",control:Toggle(preferences.DesktopIconNames,v=>preferences.DesktopIconNames=v));
@@ -160,6 +251,28 @@ public sealed class CommunitySettingsWindow : CommunityWindow
             }));
             Row(Group("适配规则"),"自动匹配","",subtitle:"优先匹配荣耀库；未收录的应用保留真实图标。");
             Row(Group("素材"),"两套官方素材","",subtitle:"单套缺少对应素材时使用同库可用版本；保留自定义图标和托盘状态。");
+        }else if(page=="模块"){
+            // Module switches used to live only in the bar's own right-click menu. The list
+            // is borrowed from the running session, so both places write one configuration.
+            if(!moduleQueried)QueryModules();
+            if(modules is null)
+            {
+                var pending=Group("顶栏与任务栏");
+                Row(pending,"模块列表",moduleError??"正在读取…");
+            }
+            else
+            {
+                bool editable=!gallery&&!controller.Store.ReadOnly&&controller.SetBarModule is not null;
+                var toolbar=Group("顶栏");var dock=Group("任务栏");
+                foreach(var module in modules)
+                {
+                    Row(toolbar,module.Label,subtitle:"显示在屏幕顶部",control:ModuleToggle(module.Toolbar,module,"toolbar",editable));
+                    Row(dock,module.Label,subtitle:"显示在屏幕边缘的 Dock",control:ModuleToggle(module.Dock,module,"dock",editable));
+                }
+                var extra=Group("维护");
+                Link(extra,"重新读取模块状态",()=>{moduleQueried=false;QueryModules();Render();});
+                Row(extra,"说明","",subtitle:editable?"开关立即写入顶栏配置，顶栏右键菜单里的同名开关会同步变化。":"顶栏未运行时无法读取模块状态。");
+            }
         }else if(page=="省电"){
             var power=CommunityPreferences.Power();var g=Group("当前");Row(g,"电源模式",controller.PowerMode+" · "+(power.Plugged?"已接通电源":"使用电池"));Row(g,"低功耗渲染",power.Saver?"已生效":"未生效");var behavior=Group("自动跟随 Windows");Row(behavior,"节电时降低渲染","自动",subtitle:"Windows 节电会限制原生毛玻璃，关闭节电后自动恢复。");var after=Group("节电时");Row(after,"背景材质",dark?"深黑实色":"浅白实色");Row(after,"动画","仅保留操作反馈");
         }else if(page=="账号"){

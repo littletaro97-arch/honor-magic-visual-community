@@ -26,20 +26,23 @@ public sealed record DesktopDockFootprint(bool Enabled,string Edge,double Thickn
     public DesktopGridInsets Insets(Display display,double scale)
     {
         if(!Enabled)return default;
-        double left=display.PixelWidth>0?display.PixelX:display.X,top=display.PixelHeight>0?display.PixelY:display.Y;
-        double right=left+(display.PixelWidth>0?display.PixelWidth:display.Width),bottom=top+(display.PixelHeight>0?display.PixelHeight:display.Height);
-        double amount=Thickness*scale;
+        // P0: the desktop viewport is now the whole monitor (rcMonitor), so the
+        // inset is simply the overlay thickness on that edge.
+        // The old formula was (rcMonitor.edge + amount - rcWork.edge), which is 0
+        // only while the taskbar sits at the bottom; with a top/left/right taskbar
+        // it produced a wrong (often zero) inset.
+        double inset=Thickness;
         return Edge switch{
-            "Left"=>new(Math.Max(0,left+amount-display.X)/scale,0,0,0),
-            "Right"=>new(0,0,Math.Max(0,display.X+display.Width-(right-amount))/scale,0),
-            "Top"=>new(0,Math.Max(0,top+amount-display.Y)/scale,0,0),
-            _=>new(0,0,0,Math.Max(0,display.Y+display.Height-(bottom-amount))/scale)};
+            "Left"=>new(inset,0,0,0),
+            "Right"=>new(0,0,inset,0),
+            "Top"=>new(0,inset,0,0),
+            _=>new(0,0,0,inset)};
     }
 }
 public static class DesktopGridLayout
 {
     public const double MinimumCell=56,Edge=24,VerticalEdge=8;
-    public static (int Width,int Height) Physical(Display display)=>(display.PixelWidth>0?display.PixelWidth:display.Width,display.PixelHeight>0?display.PixelHeight:display.Height);
+    public static (int Width,int Height) Physical(Display display)=>(display.DesktopWidth,display.DesktopHeight);
     public static (int Width,int Height) Used(Board board)
     {
         var all=DesktopPages.Grids(board).SelectMany(g=>g.Placements.Values).ToArray();
@@ -57,7 +60,7 @@ public static class DesktopGridLayout
         var settings=draft??Settings(board,display);settings.Validate();
         var physical=Physical(display);
         var inset=(dock??DesktopDockFootprint.None).Insets(display,scale);
-        double width=Math.Max(1,display.Width/scale-inset.Left-inset.Right),height=Math.Max(1,display.Height/scale-inset.Top-inset.Bottom);
+        double width=Math.Max(1,display.DesktopWidth/scale-inset.Left-inset.Right),height=Math.Max(1,display.DesktopHeight/scale-inset.Top-inset.Bottom);
         bool adaptive=!display.Primary&&board.IconGrid is null&&draft is null;
         int columns=settings.Columns,rows=settings.Rows;
         if(adaptive){
