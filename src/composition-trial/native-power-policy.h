@@ -15,6 +15,7 @@ inline void App::SubscribePower(){
 }
 inline void App::RefreshRenderPolicy(){
     ClearRetiringPopups();
+    if(shell&&shell->captionClose)shell->captionClose->Reset();
     for(auto const &window:windows)if(window->hwnd){if(window->batch)window->AnimationDone(window->animationGeneration);window->ReleaseSurfaces();window->Draw();}
     auto refresh=[&](NativePopup &p){if(!p.visible)return;if(p.dismissing){p.FinishHide();return;}p.FinishResize();p.FinishFlyoutResize();p.interactionVisual.Release(p.popupRoot);p.ResetPanelMotion();if(p.visual){p.visual.StopAnimation(L"Opacity");p.visual.Opacity(1);}p.Draw();};
     if(popup)refresh(*popup);

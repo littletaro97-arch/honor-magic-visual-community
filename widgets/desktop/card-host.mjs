@@ -1,15 +1,15 @@
 // No observer, subscription, timer or renderer exists until there is a card.
 export function createDesktopCardHost({document,renderers,dataHub,configure,shortcut=async()=>{},focus=async()=>false,openStorageCleanup=async()=>{throw new Error('管家清理入口不可用。');},onError=console.error,onDragStart=()=>{},onContextMenu=()=>{}}){
- const instances=new Map();let observer=null,listening=false,enabled=true,definitions=new Map();
+ const instances=new Map();let observer=null,listening=false,enabled=true,definitions=new Map(),honorServices=false;
  const node=(tag,cls,text)=>{const element=document.createElement(tag);element.className=cls;if(text!==undefined)element.textContent=text;return element;};
  const failure=error=>{try{onError(error);}catch{}};
  function stop(entry){const prior=entry.live;entry.live=null;if(!prior)return;prior.abort.abort();try{prior.dispose?.();}catch(error){failure(error);}entry.content.replaceChildren();}
  function reconcile(entry){
   const active=enabled&&!document.hidden&&entry.intersects,definition=definitions.get(entry.value.type),factory=renderers.get(entry.value.type,definition);
   if(!active||!definition||!factory){stop(entry);if(!entry.content.firstChild)entry.content.textContent=definition&&factory?'':"卡片暂不可用";return;}
-  const signature=JSON.stringify([entry.value,definition]);if(entry.live?.signature===signature)return;stop(entry);entry.content.replaceChildren();
+  const signature=JSON.stringify([entry.value,definition,honorServices]);if(entry.live?.signature===signature)return;stop(entry);entry.content.replaceChildren();
   const live={abort:new AbortController(),dispose:null,signature};entry.live=live;
-  const context={apiVersion:1,instance:structuredClone(entry.value),definition:structuredClone(definition),signal:live.abort.signal,
+  const context={apiVersion:1,honorServices,instance:structuredClone(entry.value),definition:structuredClone(definition),signal:live.abort.signal,
    openShortcut:index=>live.abort.signal.aborted?Promise.reject(new DOMException('Card is inactive','AbortError')):shortcut(entry.value.id,index),
    openStorageCleanup:()=>live.abort.signal.aborted||entry.value.type!=='system.storage'?Promise.resolve(false):Promise.resolve().then(()=>openStorageCleanup(entry.value.id)).catch(error=>{if(!live.abort.signal.aborted)failure(error);return false;}),
    updateSettings:settings=>live.abort.signal.aborted?Promise.reject(new DOMException('Card is inactive','AbortError')):configure(entry.value.id,settings),requestFocus:()=>live.abort.signal.aborted?Promise.resolve(false):focus(entry.root),
@@ -24,7 +24,8 @@ export function createDesktopCardHost({document,renderers,dataHub,configure,shor
  function end(){observer?.disconnect();observer=null;if(listening)document.removeEventListener('visibilitychange',visibility);listening=false;}
  function remove(id,entry){observer?.unobserve(entry.root);stop(entry);entry.root.remove();instances.delete(id);}
  return {
-  sync(cards=[],catalog=[]){
+  sync(cards=[],catalog=[],services=false){
+   honorServices=services===true;
    definitions=new Map(catalog.map(value=>[value.type,value]));const keep=new Set(cards.map(card=>card.id));for(const [id,entry] of instances)if(!keep.has(id))remove(id,entry);
    if(!cards.length){end();return [];}
    begin();const roots=[];

@@ -88,7 +88,7 @@ void Window::PaintCardContent(ID2D1DeviceContext *c,Tile const &tile,D2D1_RECT_F
             p.Text(all>0?gib(all-available)+L"/"+gib(all)+L" GiB":L"—",{14,top+22,128,top+38},11.5f,ink,600,DWRITE_TEXT_ALIGNMENT_LEADING,1);
             p.Ring(153,top+22,14,used,ink,2.6f);
             p.Text(all>0?CardNumber(used*100)+L"%":L"—",{136,top+5,170,top+39},8.5f,ink,600,DWRITE_TEXT_ALIGNMENT_CENTER,1);
-            if(disk)p.Text(L"打开管家清理",{14,153,128,176},9.5f,white);
+            if(disk&&app.model.honorSignedIn)p.Text(L"打开管家清理",{14,153,128,176},9.5f,white);
         };
         block(L"RAM",26,total,free,false);p.Line(14,92,170,92,p.theme.Gray(900,.1f));block(L"磁盘",112,diskTotal,diskFree,true);
     }else if(kind==L"text"){

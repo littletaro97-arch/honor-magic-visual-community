@@ -49,6 +49,7 @@ public sealed class Box
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "新收纳盒";
     public bool Collapsed { get; set; }
+    public bool ShowItemCount { get; set; } = true;
     public List<DesktopItem> Items { get; set; } = [];
     public int Columns { get; set; } = 2;
     public int Rows { get; set; } = 2;

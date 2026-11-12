@@ -24,6 +24,7 @@ internal sealed class CompositionShellSession : IDisposable
     private readonly TaskCompletionSource<bool> ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal Func<DesktopItem, string?>? Icon;
     internal Func<ApplicationIconSource,string?>? ApplicationIcon;
+    internal Func<ApplicationIconSource,string>? ApplicationIdentity;
     internal Func<string,string?>? InlineImage;
     internal int ReadyWindowCount=>windows.Count;
     internal event Action? BarReady;
@@ -190,7 +191,7 @@ internal sealed class CompositionShellSession : IDisposable
                                          {
                                              string key = value.GetString() ?? "";
                                              string? uri=InlineImage?.Invoke(key) ?? (assets.TryGetValue(key,out var source)?ApplicationIcon?.Invoke(source):null);
-                                             return new { key, png = uri is not null &&
+                                             return new { key, iconExecutable=assets.TryGetValue(key,out var known)?ApplicationIdentity?.Invoke(known):null, png = uri is not null &&
                                                                              uri.StartsWith("data:image/png;base64,",
                                                                                             StringComparison.Ordinal) &&
                                                                              uri.Length < 90000

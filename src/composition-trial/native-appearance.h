@@ -108,9 +108,10 @@ struct NativePaint
         layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,line,font*1.08f);
         DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER,0,0};com_ptr<IDWriteInlineObject> ellipsis;check_hresult(graphics.text->CreateEllipsisTrimmingSign(format,ellipsis.put()));layout->SetTrimming(&trim,ellipsis.get());c->DrawTextLayout({bounds.left,bounds.top},layout.get(),Color(theme.Ink()),D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
-    void Material(D2D1_RECT_F r,NativeMaterial tier,bool glass,float radius=NativeMetrics::FloatingRadius,bool icons=false)
+    void Material(D2D1_RECT_F r,NativeMaterial tier,bool glass,float radius=NativeMetrics::FloatingRadius,bool icons=false,bool outline=true)
     {
         Fill(r,theme.Material(tier,glass,icons),radius);
+        if(!outline)return;
         if(!glass){c->DrawRoundedRectangle(D2D1::RoundedRect({r.left+.5f,r.top+.5f,r.right-.5f,r.bottom-.5f},radius,radius),Color(theme.Edge()),1);return;}
         // Full curved perimeter, not a detached top line or an exterior band.
         auto stops=theme.Contour();
@@ -205,6 +206,10 @@ struct NativePaint
         else if(key==L"image"){c->DrawRoundedRectangle(D2D1::RoundedRect({3,4,21,20},3,3),Color(ink),1.7f);circle(8,9,1.5f);line(4,18,10,12);line(10,12,14,16);line(14,16,17,12);line(17,12,21,16);}
         else if(key==L"location"){circle(12,9,5);circle(12,9,1.5f);line(8,13,12,21);line(12,21,16,13);}
         else if(key==L"close"){line(6,6,18,18);line(18,6,6,18);}
+        else if(key==L"track-previous"||key==L"track-next"){
+            bool back=key==L"track-previous";float edge=back?6.f:18.f,tip=back?8.f:16.f,base=back?18.f:6.f;
+            line(edge,4,edge,20);line(tip,12,base,5);line(base,5,base,19);line(base,19,tip,12);
+        }
         else if(key==L"previous"||key==L"back"){line(15,5,8,12);line(8,12,15,19);}
         else if(key==L"next"){line(9,5,16,12);line(16,12,9,19);}
         else if(key==L"check"){line(4,12,10,18);line(10,18,21,5);}

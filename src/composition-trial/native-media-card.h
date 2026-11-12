@@ -3,10 +3,11 @@
 inline bool NativeMediaSession(JsonObject const &data){return data&&Bool(data,L"available")&&Bool(data,L"hasSession")&&!Str(data,L"id").empty();}
 inline bool NativeMediaPlaying(JsonObject const &data){return NativeMediaSession(data)&&Num(data,L"status")==4;}
 inline double NativeMediaPosition(JsonObject const &data){
-    if(!NativeMediaSession(data))return 0;double value=Num(data,L"positionMs");if(NativeMediaPlaying(data))value+=std::max(0.,static_cast<double>(GetTickCount64())-Num(data,L"observedTick",static_cast<double>(GetTickCount64())));
+    if(!NativeMediaSession(data))return 0;double value=Num(data,L"positionMs");if(NativeMediaPlaying(data))value+=std::max(0.,static_cast<double>(GetTickCount64())-Num(data,L"observedTick",static_cast<double>(GetTickCount64())))*std::clamp(Num(data,L"playbackRate",1),.25,4.);
     return std::clamp(value,0.,std::max(0.,Num(data,L"durationMs")));
 }
 inline std::wstring NativeMediaTime(double milliseconds){int seconds=static_cast<int>(std::clamp(milliseconds/1000,0.,604800.));return std::to_wstring(seconds/60)+L":"+(seconds%60<10?L"0":L"")+std::to_wstring(seconds%60);}
+inline std::wstring NativeMediaDisplayLine(JsonObject const &data){auto lyric=NativeMediaPlaying(data)?Str(data,L"lyricsText"):L"";return lyric.empty()?Str(data,L"title"):lyric;}
 inline D2D1_RECT_F NativeMediaTitleRect(float w,float h){return h<100?D2D1::RectF(36,9,w-12,30):D2D1::RectF(14,38,w-14,64);}
 inline D2D1_RECT_F NativeMediaSeekRect(float w,float h){return h<100?D2D1_RECT_F{}:D2D1::RectF(14,94,w-14,120);}
 inline int NativeMediaActionAt(float x,float y,float w,float h){
@@ -18,7 +19,7 @@ inline void PaintNativeMedia(Window &window,NativePaint &p,Tile const &tile,floa
     auto data=window.app.model.mediaData;bool ready=NativeMediaSession(data),compact=h<100,playing=NativeMediaPlaying(data);auto ink=p.theme.Ink(),muted=p.theme.MaterialMuted();
     p.Icon(L"play",{14,compact?13.f:15.f,compact?28.f:26.f,compact?27.f:27.f},muted);
     if(!compact)NativeCardText(p,ready?Str(data,L"appId"):L"音乐播放器",{33,10,w-14,32},9.5f);
-    auto title=NativeMediaTitleRect(w,h);if(!window.mediaTitles.contains(tile.key))NativeCardText(p,ready?Str(data,L"title"):!data?L"正在读取媒体…":Bool(data,L"available")?compact?L"暂无播放":L"暂无正在播放的媒体":L"媒体状态暂不可用",title,compact?12.f:14.f,600);
+    auto title=NativeMediaTitleRect(w,h);if(!window.mediaTitles.contains(tile.key))NativeCardText(p,ready?NativeMediaDisplayLine(data):!data?L"正在读取媒体…":Bool(data,L"available")?compact?L"暂无播放":L"暂无正在播放的媒体":L"媒体状态暂不可用",title,compact?12.f:14.f,600);
     if(!compact){NativeCardText(p,ready?Str(data,L"artist"):L"",{14,66,w-14,86},11);auto track=NativeMediaSeekRect(w,h);double duration=ready?Num(data,L"durationMs"):0,position=window.mediaSeekKey==tile.key?window.mediaSeekValue:NativeMediaPosition(data);float y=(track.top+track.bottom)/2;
         p.Fill({track.left,y-2,track.right,y+2},p.theme.SectionFilm(),2);if(duration>0){float end=track.left+static_cast<float>(std::clamp(position/duration,0.,1.))*(track.right-track.left);p.Fill({track.left,y-2,end,y+2},p.theme.Accent(),2);if(NativeMediaSeekSupported(tile,data))p.c->FillEllipse({{end,y},3.5f,3.5f},p.Color(p.theme.Accent()));}
         p.Text(ready?NativeMediaTime(position):L"—",{14,116,w/2,134},8.5f,muted);p.Text(ready?NativeMediaTime(duration):L"—",{w/2,116,w-14,134},8.5f,muted,400,DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -55,7 +56,7 @@ inline void Window::ClearMediaTitles(){
 }
 inline void Window::SyncMediaTitles(){
     if(!pageLayer||GridEditing()||sessionPaused||!NativeMotion(app.model)||!NativeMediaPlaying(app.model.mediaData)){ClearMediaTitles();return;}auto board=app.model.Find(boardId);if(!board){ClearMediaTitles();return;}
-    std::set<std::wstring> live;size_t used=0;auto title=Str(app.model.mediaData,L"title");if(title.size()>512)title.resize(512);
+    std::set<std::wstring> live;size_t used=0;auto title=NativeMediaDisplayLine(app.model.mediaData);if(title.size()>512)title.resize(512);
     for(auto const &tile:board->tiles){if(!tile.card||Str(tile.card,L"type")!=L"system.media"||!Bool(tile.card.GetNamedObject(L"settings",JsonObject{}),L"marqueeTitle",true)||live.size()>=8)continue;
         auto rect=RootBounds(tile.key);float w=static_cast<float>(Num(tile.card,L"columns",2))*96-8,h=static_cast<float>(Num(tile.card,L"rows",2))*96-8;auto box=NativeMediaTitleRect(w,h);float ratio=(rect.right-rect.left)/w*dpi/96,font=h<100?12.f:14.f,viewport=box.right-box.left;
         com_ptr<IDWriteTextLayout> measure;check_hresult(app.graphics.text->CreateTextLayout(title.c_str(),static_cast<UINT32>(title.size()),app.graphics.Format(font,false,600),65536,32,measure.put()));DWRITE_TEXT_METRICS metric{};measure->GetMetrics(&metric);float textWidth=std::min(metric.widthIncludingTrailingWhitespace+3,1024.f);if(textWidth<=viewport)continue;

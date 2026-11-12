@@ -58,7 +58,7 @@ for name in sorted(set(white)|set(clear)):
 for e in app_entries:
     if e['id']=='s7z': e['aliases']+=['7zFM','7zG','7-Zip']
 catalog=dict(schemaVersion=1,defaultScheme='honor-white',schemes=['honor-white','honor-translucent'],
-             applicationMatch='Exact executable stem or exact pinned shortcut name; no substring/window title matching.',
+             applicationMatch='Resolved shortcut target, exact executable, package or Steam identity; no display-name or window-title guessing.',
              apps=app_entries)
 write(assets/'catalog.json',json.dumps(catalog,ensure_ascii=False,indent=2)+'\n')
 def wide(s): return 'L"'+s.replace('\\','\\\\').replace('"','\\"')+'"'

@@ -4,6 +4,7 @@
 #include <appmodel.h>
 #include <wtsapi32.h>
 #include "window-policy.h"
+#include "window-application-identity.h"
 #pragma comment(lib,"wtsapi32.lib")
 namespace magic::system
 {
@@ -141,7 +142,8 @@ LRESULT CALLBACK Broker::KeyboardEvent(int code, WPARAM message, LPARAM value)
         if(first||chord){self->swallowA=true;return 1;}
         self->capturedChord=false;
     }
-    if (up && (key.vkCode == VK_LSHIFT || key.vkCode == VK_RSHIFT || key.vkCode == VK_SPACE))
+    if (up && (key.vkCode == VK_LSHIFT || key.vkCode == VK_RSHIFT || key.vkCode == VK_SPACE ||
+               key.vkCode == VK_LCONTROL || key.vkCode == VK_RCONTROL || key.vkCode == VK_LMENU || key.vkCode == VK_RMENU))
         PostMessageW(self->relay, InputLanguageMessage, 0, 0);
     return CallNextHookEx(nullptr, code, message, value);
 }
@@ -434,16 +436,8 @@ bool Broker::ReadWindow(HWND hwnd, WindowInfo &out) const
     try
     {
         out.path = Image(process);
-        UINT32 count = 0;
-        if (GetApplicationUserModelId(process, &count, nullptr) == ERROR_INSUFFICIENT_BUFFER && count <= 512)
-        {
-            std::wstring app(count, L'\0');
-            if (GetApplicationUserModelId(process, &count, app.data()) == ERROR_SUCCESS)
-            {
-                app.resize(wcslen(app.c_str()));
-                out.aumid = app;
-            }
-        }
+        out.aumid=ProcessApplicationId(process);
+        if(out.aumid.empty())out.aumid=HostedApplicationId(hwnd,out.pid,out.path);
         out.created = Created(process);
         if(SecurityApplication(out.aumid))return false;
     }
@@ -855,9 +849,16 @@ JsonObject Broker::Action(JsonObject const &request)
     known=known&&GetTokenInformation(token,TokenElevation,&elevation,sizeof(elevation),&count);
     if(!known || elevation.TokenIsElevated) {
         Flag(o,L"accepted",false);Flag(o,L"needsElevation",true);
+        // The adapter delegated its click grant to this broker. A second grant
+        // to a different PID revokes the first one; return it before the adapter
+        // hands this same interaction to its authenticated elevated helper.
+        Flag(o,L"foregroundReturned",(action==L"activate"||action==L"restore") &&
+            foregroundDelegate && AllowSetForegroundWindow(foregroundDelegate));
         Text(o,L"status",L"elevation_required");return o;
     }
     auto result=magic::window_action::Perform(now.hwnd,action);
+    if(result.error==ERROR_ACCESS_DENIED && (action==L"activate"||action==L"restore"))
+        Flag(o,L"foregroundReturned",foregroundDelegate && AllowSetForegroundWindow(foregroundDelegate));
     Flag(o,L"accepted",result.accepted);Flag(o,L"needsElevation",result.error==ERROR_ACCESS_DENIED);
     Flag(o,L"restored",result.restored);Flag(o,L"activated",result.activated);Flag(o,L"minimized",result.minimized);
     Flag(o,L"closeRequested",action==L"close"&&result.accepted);

@@ -56,6 +56,7 @@ using namespace Windows::Foundation::Numerics;
 namespace abiComposition = ABI::Windows::UI::Composition;
 constexpr UINT PacketMessage = WM_APP + 1, AnimationMessage = WM_APP + 2;
 constexpr size_t PacketLimit = 1024 * 1024, IconLimit = 8 * 1024 * 1024, SurfaceLimit = 64 * 1024 * 1024;
+#include "native-icon-cache.h"
 inline std::wstring Str(JsonObject const &value, wchar_t const *key)
 {
     auto v = value ? value.TryLookup(key) : nullptr;
@@ -109,7 +110,8 @@ struct Tile
     std::wstring key, name, target, folder;
     std::vector<Tile> items;
     JsonObject card{nullptr};
-    bool isVirtual = false, isFolder = false;
+    bool isVirtual = false, isFolder = false, showItemCount = true;
+    std::wstring iconExecutable;
 };
 struct Place
 {
@@ -143,6 +145,7 @@ struct Model
     JsonObject cardData{nullptr},weatherData{nullptr},preferences{nullptr},encodeckData{nullptr},todoData{nullptr},honorData{nullptr},mediaData{nullptr};
     JsonArray handoffData{};uint64_t handoffVersion=0;
     JsonArray cardDefinitions{};
+    bool honorSignedIn=false;double iconIdentityVersion=0;
     std::vector<Board> boards;
     bool AcceptsSnapshot(JsonObject const &value)const{
         return session.empty()||(Str(value,L"session")==session&&static_cast<long long>(Num(value,L"revision",-1))>=revision);
@@ -157,6 +160,7 @@ struct Model
         synthetic = Bool(value, L"syntheticIcons");
         components=Bool(value,L"components");desktopRuntime=Bool(value,L"desktopRuntime");
         if(auto flow=value.TryLookup(L"handoffData");flow&&flow.ValueType()==JsonValueType::Array){handoffData=flow.GetArray();++handoffVersion;}
+        honorSignedIn=Bool(value,L"honorSignedIn");iconIdentityVersion=Num(value,L"iconIdentityVersion");
         if(auto services=value.TryLookup(L"honorData");services&&services.ValueType()==JsonValueType::Object)honorData=services.GetObject();
         if(auto tasks=value.TryLookup(L"todoData");tasks&&tasks.ValueType()==JsonValueType::Object)todoData=tasks.GetObject();
         frontendVersion=Str(value,L"frontendVersion");recycleFull=Bool(value,L"recycleBinFull");
@@ -195,7 +199,7 @@ struct Model
             {
                 auto s = t.GetObject();
                 Tile tile{Str(s, L"key"), Str(s, L"name"), Str(s, L"target"), Str(s, L"folderId"), {}};
-                tile.isVirtual=Bool(s,L"isVirtual");tile.isFolder=Bool(s,L"isFolder");
+                tile.isVirtual=Bool(s,L"isVirtual");tile.isFolder=Bool(s,L"isFolder");tile.showItemCount=Bool(s,L"showItemCount",true);tile.iconExecutable=Str(s,L"iconExecutable");
                 if(auto card=s.TryLookup(L"card");card&&card.ValueType()==JsonValueType::Object)tile.card=card.GetObject();
                 auto children = s.TryLookup(L"items");
                 if (children && children.ValueType() == JsonValueType::Array)
@@ -203,7 +207,7 @@ struct Model
                     {
                         auto c = f.GetObject();
                         Tile child{Str(c,L"key"),Str(c,L"name"),Str(c,L"target"),L"",{}};
-                        child.isVirtual=Bool(c,L"isVirtual");child.isFolder=Bool(c,L"isFolder");tile.items.push_back(std::move(child));
+                        child.isVirtual=Bool(c,L"isVirtual");child.isFolder=Bool(c,L"isFolder");child.iconExecutable=Str(c,L"iconExecutable");tile.items.push_back(std::move(child));
                     }
                 b.tiles.push_back(std::move(tile));
             }
@@ -230,6 +234,7 @@ struct NativeRenderScope {
 };
 class PipeClient
 {
+    friend int CheckTrayRouting(std::wstring const &); // Owned input and serialized commands; no connected peer.
     friend int CheckCenterPanels(std::wstring const &); // Owned fixture inspects serialized output without a connected peer.
     friend int CheckFolderDragReturn(std::wstring const &); // Owned OLE messages, no connected adapter or file operations.
     HANDLE pipe = INVALID_HANDLE_VALUE;
@@ -578,6 +583,7 @@ struct Window
     com_ptr<ID2D1SolidColorBrush> paintBrush;
     bool dragOutPreview = false, sessionPaused = false, everShown = false;
     std::map<std::wstring,float> todoScrolls;std::map<std::wstring,std::wstring> todoSelectedDays;
+    std::map<std::wstring,std::pair<std::wstring,int>> weatherHourPages;
     int pageEdge = 0;
     int AvailablePageEdge(int direction)const;
     std::function<void()> dragPageDwell;
@@ -672,7 +678,7 @@ struct Window
     bool CanDrop(JsonObject const &drag, float x, float y);
     void DrawSurface(CompositionDrawingSurface surface, bool folder);
     void DrawIfChanged(CompositionDrawingSurface surface, bool folder);
-    void PaintTile(ID2D1DeviceContext *context, Tile const &tile, D2D1_RECT_F rect, int index,bool inFolder=false);
+    void PaintTile(ID2D1DeviceContext *context, Tile const &tile, D2D1_RECT_F rect, int index,bool inFolder=false,bool detached=false);
     void PaintCard(ID2D1DeviceContext *context, Tile const &tile, D2D1_RECT_F rect);
     void PaintCardContent(ID2D1DeviceContext *context, Tile const &tile, D2D1_RECT_F rect);
     void CardAction(std::wstring const &key, std::wstring const &kind, int index=0);

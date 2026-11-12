@@ -6,6 +6,18 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Security.Cryptography;
+if(args.Length==3&&args[0]=="--tray-order-checks"){TrayOrderChecks.Run(args[1],args[2]);return 0;}
+if(args.Length==2&&args[0]=="--weather-hours-checks"){WeatherHoursChecks.Run(args[1]);return 0;}
+if(args.Length==2&&args[0]=="--nov09-details-checks"){await Nov09DetailsChecks.Run(args[1]);return 0;}
+if(args.Length==2&&args[0]=="--icon-identity-checks"){IconIdentityChecks.Run(args[1]);return 0;}
+if(args.Length==4&&args[0]=="--media-inventory"){
+    string output=Path.GetFullPath(args[3]);Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+    var stateDirectory=Path.Combine(Path.GetDirectoryName(output)!,"media-owned-state");Directory.CreateDirectory(stateDirectory);
+    await using var owner=await NativeSystemClient.Start(args[1],args[2],CancellationToken.None,stateDirectory);
+    var state=await owner.Request("media-read",new{});
+    File.WriteAllText(output,JsonSerializer.Serialize(new{state,scope="Read-only SMTC metadata; no subscriptions, artwork, playback actions or desktop activation."},new JsonSerializerOptions{WriteIndented=true}));return 0;
+}
+if(args.Length==2&&args[0]=="--music-sources-checks"){await ToolbarSourcesChecks.Run(args[1]);return 0;}
 if(args.Length==2&&args[0]=="--music-checks"){await ToolbarMusicChecks.Run(args[1]);return 0;}
 if(args.Length==2&&args[0]=="--lyrics-user-samples"){await ToolbarMusicChecks.Live(args[1]);return 0;}
 if(args.Length==2&&args[0]=="--lyrics-checks"){await ToolbarLyricsChecks.Run(args[1]);return 0;}

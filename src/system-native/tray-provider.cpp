@@ -35,9 +35,10 @@ std::wstring CaptureAssetKey(std::vector<BYTE> const &bytes)
     std::wstring key; wchar_t pair[3]{}; for (BYTE value : digest) { swprintf_s(pair, L"%02x", value); key += pair; }
     return key;
 }
-std::wstring EncodeIcon(BYTE const *premultiplied)
+std::wstring EncodeIcon(BYTE const *premultiplied,ULONG width,ULONG height)
 {
-    std::vector<BYTE> rgba(premultiplied, premultiplied + MAGIC_TRAY_BYTES);
+    if(!width||!height||width>MAGIC_TRAY_ICON_SIZE||height>MAGIC_TRAY_ICON_SIZE)throw std::runtime_error("Tray image dimensions exceed bound");
+    std::vector<BYTE> rgba(premultiplied, premultiplied + width*height*4);
     for (size_t i = 0; i < rgba.size(); i += 4)
     {
         unsigned a = rgba[i + 3];
@@ -57,13 +58,13 @@ std::wstring EncodeIcon(BYTE const *premultiplied)
     winrt::com_ptr<IPropertyBag2> options;
     winrt::check_hresult(encoder->CreateNewFrame(frame.put(), options.put()));
     winrt::check_hresult(frame->Initialize(options.get()));
-    winrt::check_hresult(frame->SetSize(MAGIC_TRAY_ICON_SIZE, MAGIC_TRAY_ICON_SIZE));
+    winrt::check_hresult(frame->SetSize(width, height));
     WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
     winrt::check_hresult(frame->SetPixelFormat(&format));
     if (format != GUID_WICPixelFormat32bppBGRA)
         throw std::runtime_error("Unexpected tray encoder format");
     winrt::check_hresult(
-        frame->WritePixels(MAGIC_TRAY_ICON_SIZE, MAGIC_TRAY_ICON_SIZE * 4, DWORD(rgba.size()), rgba.data()));
+        frame->WritePixels(height, width * 4, DWORD(rgba.size()), rgba.data()));
     winrt::check_hresult(frame->Commit());
     winrt::check_hresult(encoder->Commit());
     STATSTG stat{};
@@ -324,7 +325,9 @@ struct TrayProvider::Impl
             shared =
                 static_cast<MagicTrayShared *>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(MagicTrayShared)));
             Check(shared != nullptr);
-            ZeroMemory(shared, sizeof(*shared));
+            // This is a new paging-file-backed mapping (existing names were
+            // rejected above). Windows supplies zero pages; do not eagerly
+            // touch the entire bounded image queue at startup.
             shared->signature = MAGIC_TRAY_SIGNATURE;
             shared->version = MAGIC_TRAY_VERSION;
             shared->bytes = sizeof(*shared);
@@ -516,6 +519,8 @@ JsonObject TrayProvider::Read()
         Flag(item, L"actionAvailable", row.processCreated != 0);
         Number(item, L"callbackVersion", row.data.version == MAGIC_TRAY_VERSION_UNKNOWN ? -1 : static_cast<double>(row.data.version));
         uint64_t hash = 1469598103934665603ULL;
+        hash = (hash ^ row.data.pixelWidth) * 1099511628211ULL;
+        hash = (hash ^ row.data.pixelHeight) * 1099511628211ULL;
         for (auto b : row.data.pixels)
         {
             hash ^= b;
@@ -523,7 +528,7 @@ JsonObject TrayProvider::Read()
         }
         if (row.data.hasPixels && hash != row.imageHash)
         {
-            row.png = EncodeIcon(row.data.pixels);
+            row.png = EncodeIcon(row.data.pixels,row.data.pixelWidth,row.data.pixelHeight);
             row.imageHash = hash;
         }
         Text(item, L"imageVersion", std::to_wstring(row.imageHash));
@@ -557,8 +562,13 @@ JsonObject TrayProvider::Action(JsonObject const &args)
         ownerCreated = item->second.processCreated;
     }
     DWORD livePid = 0; GetWindowThreadProcessId(reinterpret_cast<HWND>(offered.ownerHwnd), &livePid);
-    Handle owner{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, offered.ownerPid)};
-    if (livePid != offered.ownerPid || !owner.value || !ownerCreated || Created(owner) != ownerCreated || WaitForSingleObject(owner, 0) != WAIT_TIMEOUT)
+    // Query-only owners (including protected vendor utilities) need not grant
+    // SYNCHRONIZE. Keep the HWND/PID/creation identity check used at capture.
+    Handle owner{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, offered.ownerPid)};
+    if (!owner.value) winrt::throw_last_error();
+    DWORD exitCode=0;
+    if (livePid != offered.ownerPid || !ownerCreated || Created(owner) != ownerCreated ||
+        !GetExitCodeProcess(owner,&exitCode) || exitCode!=STILL_ACTIVE)
         throw std::invalid_argument("Tray owner expired");
     bool ownerForegroundGranted = AllowSetForegroundWindow(offered.ownerPid) != FALSE;
     auto number = [&](wchar_t const *key) {

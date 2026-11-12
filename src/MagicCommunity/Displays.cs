@@ -37,10 +37,27 @@ public static class Displays
     [DllImport("user32.dll", SetLastError=true)] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(IntPtr monitor, int kind, out uint x, out uint y);
+    internal static string? ReadActiveIdentity(Func<uint, (string Id, uint Flags)?> read)
+    {
+        // An adapter's first monitor can be the disabled laptop panel. Keep
+        // the Windows order for clone views, but never select an inactive entry.
+        for (uint index = 0; index < 64; index++)
+        {
+            var device = read(index);
+            if (device is null) break;
+            if ((device.Value.Flags & 1) == 0) continue; // DISPLAY_DEVICE_ACTIVE
+            return string.IsNullOrWhiteSpace(device.Value.Id) ? null : device.Value.Id;
+        }
+        return null;
+    }
+    internal static bool CanReconcile(IReadOnlyList<Display> screens) =>
+        screens.Count > 0 && screens.Count(s => s.Primary) == 1 &&
+        screens.All(s => !string.IsNullOrWhiteSpace(s.Id) && !s.Id.StartsWith("temporary:", StringComparison.OrdinalIgnoreCase) && s.Width > 0 && s.Height > 0) &&
+        screens.Select(s => s.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() == screens.Count;
     private static string Hardware(string id)
     {
         // The interface gives the registry instance. Persist only a hash of EDID,
-        // never its raw serial. Without a unique serial use conservative reflow.
+        // never its raw serial. An unavailable serial cannot identify a replacement.
         var parts=id.Split('#');if(parts.Length<3)return "";
         try {
             using var key=Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\DISPLAY\"+parts[1]+"\\"+parts[2]+@"\Device Parameters");
@@ -59,10 +76,13 @@ public static class Displays
         {
             var info = new MonitorInfo { Size = (uint)Marshal.SizeOf<MonitorInfo>() };
             if (!GetMonitorInfo(monitor, ref info)) { error = new Win32Exception(); return false; }
-            var device = new DisplayDevice { Size = (uint)Marshal.SizeOf<DisplayDevice>() };
-            var found = EnumDisplayDevices(info.Device, 0, ref device, 1); // EDD_GET_DEVICE_INTERFACE_NAME
+            var activeId = ReadActiveIdentity(index =>
+            {
+                var device = new DisplayDevice { Size = (uint)Marshal.SizeOf<DisplayDevice>() };
+                return EnumDisplayDevices(info.Device, index, ref device, 1) ? (device.Id, device.Flags) : null; // EDD_GET_DEVICE_INTERFACE_NAME
+            });
             // Interface identity survives primary/secondary order changes. Fallback is labeled explicitly.
-            string id = found && !string.IsNullOrWhiteSpace(device.Id) ? device.Id : "temporary:" + info.Device;
+            string id = activeId ?? "temporary:" + info.Device;
             uint dpi=0;try{if(GetDpiForMonitor(monitor,0,out var dx,out _)==0)dpi=dx;}catch(DllNotFoundException){}catch(EntryPointNotFoundException){}
             displays.Add(new(id, $"{((info.Flags & 1) != 0 ? "主屏" : "副屏")} · {info.Monitor.Right-info.Monitor.Left} × {info.Monitor.Bottom-info.Monitor.Top}" + (id.StartsWith("temporary:") ? "（临时标识）" : ""),
                 info.Device, info.Work.Left, info.Work.Top, info.Work.Right-info.Work.Left, info.Work.Bottom-info.Work.Top, (info.Flags & 1) != 0){PixelX=info.Monitor.Left,PixelY=info.Monitor.Top,PixelWidth=info.Monitor.Right-info.Monitor.Left,PixelHeight=info.Monitor.Bottom-info.Monitor.Top,Dpi=dpi,HardwareIdentity=Hardware(id)});

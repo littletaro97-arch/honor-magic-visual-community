@@ -36,6 +36,10 @@ internal static class ToolbarMusicChecks
         Check("wrong-performer-rejected",NativeToolbarLyrics.ReadResponse(track,Record(artist:"花玲")).Length==0);
         Check("different-duration-rejected",NativeToolbarLyrics.ReadResponse(track,Record(duration:289)).Length==0);
         Check("different-live-version-rejected",NativeToolbarLyrics.ReadResponse(track,Record(title:"我不曾忘记 (Live)")).Length==0);
+        var star=new NativeToolbarLyrics.Track("提瓦特民谣 (星空版)","鹿喑kana / 多多poi / Mace / 陶典 / 孙晔 / 花玲","",214);
+        Check("version-brackets-only-do-not-block-match",NativeToolbarLyrics.ReadResponse(star,Record(title:"提瓦特民谣 星空版",artist:"鹿喑kana; 多多poi; Mace; 陶典; 孙晔; 花玲",duration:214)).Length==1);
+        Check("version-words-still-required",NativeToolbarLyrics.ReadResponse(star,Record(title:"提瓦特民谣",artist:star.Artist,duration:214)).Length==0);
+        Check("search-preserves-version-words",Uri.UnescapeDataString(NativeToolbarLyrics.SearchQuery(star).Query).Contains("星空版")&&!NativeToolbarLyrics.SearchQuery(star).Query.Contains("%28"));
         Check("soundtrack-annotation-matches-with-known-duration",NativeToolbarLyrics.ReadResponse(track,Record(title:"我不曾忘记 (游戏《原神》2023新春会同人曲)")).Length==1);
         Check("annotation-not-relaxed-without-duration",NativeToolbarLyrics.ReadResponse(track with{DurationSeconds=0},Record(title:"我不曾忘记 (游戏《原神》2023新春会同人曲)")).Length==0);
         Check("ordinary-parenthetical-title-preserved",NativeToolbarLyrics.SearchTitle("Song (Part II)")=="Song (Part II)");
@@ -50,15 +54,16 @@ internal static class ToolbarMusicChecks
             Check("exact-hit-does-not-add-network-request",(await lyrics.Fetch(track,CancellationToken.None)).Length==1&&handler.Count==1);
         }
         using(var handler=new Handler((_,_)=>new(HttpStatusCode.TooManyRequests)))using(var http=new HttpClient(handler))using(var lyrics=new NativeToolbarLyrics(()=>{},http:http)){
-            Check("rate-limit-does-not-fan-out-search",(await lyrics.Fetch(track,CancellationToken.None)).Length==0&&handler.Count==1);
+            bool limited=false;try{await lyrics.Fetch(track,CancellationToken.None);}catch(HttpRequestException){limited=true;}
+            Check("rate-limit-does-not-fan-out-search-or-report-missing",limited&&handler.Count==1);
         }
         File.WriteAllText(output,JsonSerializer.Serialize(new{allPass=true,checks,scope="Owned configuration, snapshots and mock HTTP. No playback, network or installed settings changed."},new JsonSerializerOptions{WriteIndented=true}));
     }
     internal static async Task Live(string output){
         var result=new List<object>();using var lyrics=new NativeToolbarLyrics(()=>{});
-        foreach(var track in new[]{new NativeToolbarLyrics.Track("我不曾忘记","花玲/张安琪/沐霏","我不曾忘记",231),new NativeToolbarLyrics.Track("我不曾忘记 (游戏《原神》2023新春会同人曲)","花玲/张安琪/沐霏","我不曾忘记 (游戏《原神》2023新春会同人曲)",231),new NativeToolbarLyrics.Track("La vaguelette","HOYO-MiX","Genshin Impact - La vaguelette (Original Game Soundtrack)",150)}){
+        foreach(var track in new[]{new NativeToolbarLyrics.Track("提瓦特民谣 (星空版)","鹿喑kana / 多多poi / Mace / 陶典 / 孙晔 / 花玲","",214),new NativeToolbarLyrics.Track("昔涟","张韶涵 / HOYO-MiX","",186),new NativeToolbarLyrics.Track("我不曾忘记","花玲/张安琪/沐霏","我不曾忘记",231),new NativeToolbarLyrics.Track("我不曾忘记 (游戏《原神》2023新春会同人曲)","花玲/张安琪/沐霏","我不曾忘记 (游戏《原神》2023新春会同人曲)",231),new NativeToolbarLyrics.Track("La vaguelette","HOYO-MiX","Genshin Impact - La vaguelette (Original Game Soundtrack)",150)}){
             var lines=await lyrics.Fetch(track,CancellationToken.None);result.Add(new{track.Title,track.Artist,track.DurationSeconds,matched=lines.Length>0,lineCount=lines.Length});
         }
-        File.WriteAllText(output,JsonSerializer.Serialize(new{samples=result,scope="Only user-specified public track metadata. Durations from public catalogue, not live QQ playback. Lyrics bodies not retained."},new JsonSerializerOptions{WriteIndented=true}));
+        File.WriteAllText(output,JsonSerializer.Serialize(new{samples=result,scope="Only user-specified public track metadata. Durations from supplied screenshots or public catalogue, not live QQ playback. Lyrics bodies not retained."},new JsonSerializerOptions{WriteIndented=true}));
     }
 }

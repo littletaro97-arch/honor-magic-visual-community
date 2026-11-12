@@ -9,7 +9,9 @@ struct NativePopupResize {
         if(p.popupRoot)p.popupRoot.Size({static_cast<float>(w),static_cast<float>(h)});if(p.popupScene)p.popupScene.Size({static_cast<float>(w),static_cast<float>(h)});
         auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(2*p.MaterialRadius()*p.dpi/96),static_cast<int>(2*p.MaterialRadius()*p.dpi/96));if(!SetWindowRgn(p.hwnd,region,FALSE))DeleteObject(region);
     }
-    void Release(NativePopup &p){if(p.refreshVisual&&p.refreshVisual.Parent()!=p.popupRoot){if(p.refreshVisual.Parent())p.refreshVisual.Parent().Children().Remove(p.refreshVisual);p.popupRoot.Children().InsertAtTop(p.refreshVisual);p.SyncRefreshFeedback();}frame.Release();previous=nullptr;next=nullptr;bytes=0;if(p.visual)p.visual.IsVisible(true);if(p.materialVisual)p.materialVisual.IsVisible(true);}
+    void Release(NativePopup &p){if(p.refreshVisual&&p.refreshVisual.Parent()!=p.popupRoot){if(p.refreshVisual.Parent())p.refreshVisual.Parent().Children().Remove(p.refreshVisual);p.popupRoot.Children().InsertAtTop(p.refreshVisual);p.SyncRefreshFeedback();}
+        for(auto &[id,toggle]:p.toggleVisuals)if(toggle.root&&toggle.root.Parent()!=p.popupRoot){auto offset=toggle.root.Offset();if(toggle.root.Parent())toggle.root.Parent().Children().Remove(toggle.root);p.popupRoot.Children().InsertAtTop(toggle.root);toggle.root.Offset({offset.x+10*p.dpi/96,offset.y+10*p.dpi/96,0});}
+        frame.Release();previous=nullptr;next=nullptr;bytes=0;if(p.visual)p.visual.IsVisible(true);if(p.materialVisual)p.materialVisual.IsVisible(true);}
     void Start(NativePopup &p,RECT before,RECT after,CompositionDrawingSurface const &old,size_t oldBytes,float oldHeight){
         target=after;bytes=oldBytes;float unit=p.dpi/96;auto &g=p.app.graphics;auto c=g.compositor;
         RECT extent{std::min(before.left,after.left),std::min(before.top,after.top),std::max(before.right,after.right),std::max(before.bottom,after.bottom)};
@@ -23,6 +25,9 @@ struct NativePopupResize {
         auto pixels=[&](CompositionDrawingSurface const &surface,float height){auto v=c.CreateSpriteVisual();v.Size({p.width*unit,height*unit});v.Offset({-10*unit,-10*unit,0});v.Brush(c.CreateSurfaceBrush(surface));frame.root.Children().InsertAtTop(v);return v;};
         previous=pixels(old,oldHeight);next=pixels(p.surface,p.height);next.Opacity(0);p.visual.IsVisible(false);if(p.materialVisual)p.materialVisual.IsVisible(false);
         if(p.refreshVisual){auto offset=p.refreshVisual.Offset();if(p.refreshVisual.Parent())p.refreshVisual.Parent().Children().Remove(p.refreshVisual);frame.root.Children().InsertAtTop(p.refreshVisual);p.refreshVisual.Offset({offset.x-10*unit,offset.y-10*unit,0});}
+        // Switches stay live while their device list changes the panel height.
+        // Reparent the same visuals; neither raster snapshot paints a second knob.
+        for(auto &[id,toggle]:p.toggleVisuals)if(toggle.root){auto offset=toggle.root.Offset();if(toggle.root.Parent())toggle.root.Parent().Children().Remove(toggle.root);frame.root.Children().InsertAtTop(toggle.root);toggle.root.Offset({offset.x-10*unit,offset.y-10*unit,0});}
         frame.Animate(c,end,p.MaterialRadius()*unit,theme.Material(p.MaterialTier(),p.Glass(),p.kind==L"@magic/system-tray"),Duration);
         NativeInteractionMotion::Vector(c,frame.root,L"Offset",{static_cast<float>(after.left-extent.left)+10*unit,static_cast<float>(after.top-extent.top)+10*unit,0},Duration);
         NativeInteractionMotion::Opacity(c,previous,0,Duration);NativeInteractionMotion::Opacity(c,next,1,Duration);

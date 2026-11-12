@@ -20,6 +20,8 @@ public static class DesktopGridActions
     public static string ItemId(DesktopItem item)=>Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(item.Target.ToUpperInvariant())));
     public static string ItemKey(DesktopItem item)=>"item:"+ItemId(item);
     public static string FolderKey(Box box)=>"folder:"+box.Id;
+    public static void SetFolderCount(Board board,string id,bool show)
+        =>(board.Boxes.SingleOrDefault(box=>box.Id==id)??throw new LayoutEditException("大文件夹已变化，请重新打开菜单。")).ShowItemCount=show;
     public static bool ValidSize(int columns,int rows)=>(columns,rows) is (2,2) or (4,2) or (4,4);
     public static bool StoredSize(int columns,int rows)=>ValidSize(columns,rows)||(columns,rows)==(2,4);
     private static bool Overlaps(GridRect a,GridRect b)=>a.X<b.X+b.W&&a.X+a.W>b.X&&a.Y<b.Y+b.H&&a.Y+a.H>b.Y;

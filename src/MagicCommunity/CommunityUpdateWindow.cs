@@ -40,7 +40,7 @@ internal sealed class CommunityUpdateWindow:CommunityWindow
         FontFamily=CommunityFont.Family;FontSize=13;
         var root=new DockPanel{Margin=new(24,12,24,24)};chrome.Child=root;chrome.CornerRadius=new(NativeWpfTheme.FloatingRadius);Content=chrome;
         var footer=new StackPanel{HorizontalAlignment=HorizontalAlignment.Center,Margin=new(0,14,0,0)};DockPanel.SetDock(footer,Dock.Bottom);root.Children.Add(footer);
-        button.Content="检查更新";button.Width=210;button.Height=40;button.Foreground=Brushes.White;button.Background=new SolidColorBrush(Color.FromRgb(142,179,253));button.BorderThickness=new(0);button.Click+=async(_,_)=>{if(result?.State==CommunityUpdateState.Available)OpenRelease();else await Check();};footer.Children.Add(button);
+        button.Content="检查更新";button.Width=210;button.Height=40;button.Foreground=Brushes.White;button.Background=SystemColors.HighlightBrush;button.BorderThickness=new(0);button.Click+=async(_,_)=>{if(result?.State==CommunityUpdateState.Available)OpenRelease();else await Check();};footer.Children.Add(button);
         releaseLink.Content="GitHub 发布页 ↗";releaseLink.Height=28;releaseLink.Margin=new(0,6,0,0);releaseLink.Background=Brushes.Transparent;releaseLink.BorderThickness=new(0);releaseLink.Foreground=theme.Ink;releaseLink.Click+=(_,_)=>OpenPage(GitHubCommunityUpdateSource.ReleasesPage);footer.Children.Add(releaseLink);
         var body=new Grid();body.RowDefinitions.Add(new(){Height=GridLength.Auto});body.RowDefinitions.Add(new(){Height=new(1,GridUnitType.Star)});root.Children.Add(body);
         var heading=new StackPanel{MaxWidth=400,Margin=new(0,35,0,0),HorizontalAlignment=HorizontalAlignment.Center};body.Children.Add(heading);

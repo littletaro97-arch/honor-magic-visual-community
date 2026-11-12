@@ -74,7 +74,7 @@ class TrialDragImage {
         auto &g=window.app.graphics;surface=g.composition.CreateDrawingSurface({static_cast<float>(w),static_cast<float>(h)},Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,Windows::Graphics::DirectX::DirectXAlphaMode::Premultiplied);
         auto drawing=surface.as<abiComposition::ICompositionDrawingSurfaceInterop>();com_ptr<ID2D1DeviceContext> c;POINT offset{};check_hresult(drawing->BeginDraw(nullptr,__uuidof(ID2D1DeviceContext),c.put_void(),&offset));
         c->SetDpi(96*raster,96*raster);c->SetTransform(D2D1::Matrix3x2F::Translation(offset.x/raster,offset.y/raster));c->Clear(D2D1::ColorF(0,0));
-        bool prior=window.dragging;window.dragging=false;try{for(auto const &[tile,rect]:tiles)window.PaintTile(c.get(),tile,rect,0,fromFolder);check_hresult(drawing->EndDraw());}catch(...){window.dragging=prior;drawing->EndDraw();throw;}window.dragging=prior;
+        bool prior=window.dragging;window.dragging=false;try{for(auto const &[tile,rect]:tiles)window.PaintTile(c.get(),tile,rect,0,fromFolder,true);check_hresult(drawing->EndDraw());}catch(...){window.dragging=prior;drawing->EndDraw();throw;}window.dragging=prior;
         visual.Brush(g.compositor.CreateSurfaceBrush(surface));visual.Size({width*scale,height*scale});visual.Opacity(.85f);
     }
 public:

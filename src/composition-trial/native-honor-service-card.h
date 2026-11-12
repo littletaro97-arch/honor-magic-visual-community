@@ -15,6 +15,7 @@ inline int NativeServiceHit(Window &window,Tile const &tile,float x,float y,floa
 }
 inline void Window::HonorPage(Tile const &tile,int direction){auto rows=NativeServiceRows(*this,tile);int last=std::max(0,(static_cast<int>(rows.size())+NativeServiceCapacity(tile)-1)/NativeServiceCapacity(tile)-1);auto &page=honorServicePages[tile.key];page=std::clamp(page+direction,0,last);honorServiceFocus[tile.key]=-1;DrawCards(true,L"system.honor-service");}
 inline void PaintNativeHonorService(Window &window,NativePaint &paint,Tile const &tile,float width,float){
+    if(!window.app.model.honorSignedIn){paint.Text(L"卡片暂不可用",{14,60,width-14,164},12,paint.theme.MaterialMuted(),400,DWRITE_TEXT_ALIGNMENT_CENTER);return;}
     auto rows=NativeServiceRows(window,tile);int capacity=NativeServiceCapacity(tile),page=NativeServicePage(window,tile,static_cast<int>(rows.size())),pages=std::max(1,(static_cast<int>(rows.size())+capacity-1)/capacity);
     paint.Text(width>200?L"荣耀服务中心":L"荣耀服务",{14,10,width-84,35},width>200?14.f:12.f,paint.theme.Ink(),600);
     paint.Icon(L"previous",{width-80,18,width-68,30},paint.theme.MaterialMuted());paint.Text(std::to_wstring(page+1)+L"/"+std::to_wstring(pages),{width-67,10,width-34,35},9,paint.theme.Ink(),400,DWRITE_TEXT_ALIGNMENT_CENTER);paint.Icon(L"next",{width-26,18,width-14,30},paint.theme.MaterialMuted());

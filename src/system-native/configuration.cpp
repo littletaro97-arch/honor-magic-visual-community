@@ -13,7 +13,7 @@ constexpr wchar_t const *Modules[] = {
     L"magic.keyboard",    L"magic.battery",      L"magic.network", L"magic.quick-settings", L"magic.notifications",
     L"magic.audio",       L"magic.player",       L"magic.start",   L"magic.desktop",        L"magic.recycle",
     L"magic.cpu",         L"magic.memory",       L"magic.gpu",     L"magic.storage",        L"magic.network-usage",
-    L"magic.focused-app", L"magic.focused-title", L"magic.lyrics", L"magic.music"};
+    L"magic.focused-app", L"magic.focused-title", L"magic.lyrics", L"magic.music", L"magic.pc-manager"};
 void BoundedText(JsonObject const &object, wchar_t const *key, size_t max, bool optional = false)
 {
     if (optional && !object.HasKey(key))

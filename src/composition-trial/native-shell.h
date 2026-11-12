@@ -1,9 +1,13 @@
 #pragma once
 #include "native-popup.h"
 #include "native-tray-menu-anchor.h"
+#include "native-dock-groups.h"
 #include <dwmapi.h>
 #include "native-toolbar-assets.h"
 #include "native-dissolve.h"
+#include "../shared/brightness-feedback.h"
+#include "native-toolbar-contrast.h"
+#include "native-window-close.h"
 inline JsonObject ShellObject(JsonObject const &data, wchar_t const *key)
 {
     auto value = data.TryLookup(key);
@@ -50,6 +54,9 @@ struct NativeBar : NativePopup
     JsonObject data{nullptr}, settings{nullptr};
     ContainerVisual toolbarRoot{nullptr},toolbarLayer{nullptr},barHost{nullptr};
     NativeDissolve::Session dockDissolve;NativeHoverVisual barInteraction;
+    NativeToolbarContrast toolbarContrast;std::map<std::wstring,bool> toolbarInk;bool contrastScheduled=false;
+    std::shared_ptr<NativeToolbarContrastWork::State> contrastWork;
+    bool ToolbarItemDark(int)const;void ScheduleToolbarContrast();void SampleToolbarContrast();void FinishToolbarContrast(WPARAM);
     bool toolbarOccluded=false,occlusionAnimating=false,occlusionLower=false;
     void FinishToolbarOcclusion(){
         if(!occlusionAnimating)return;occlusionAnimating=false;KillTimer(hwnd,99);dockDissolve.Reset(barHost,toolbarRoot);
@@ -71,6 +78,14 @@ struct NativeBar : NativePopup
             occlusionAnimating=true;if(SetTimer(hwnd,99,NativeDissolve::DurationMs+16,nullptr))return;
         }
         occlusionAnimating=true;FinishToolbarOcclusion();
+    }
+    void RevealToolbarDesktop(){
+        if(dock||!toolbarRoot||!visible||edge||toolbarOccluded||!NativeFeedbackMotion(app.model))return;
+        if(occlusionAnimating)FinishToolbarOcclusion();
+        bool grain=NativeMotion(app.model)&&dockDissolve.Start(app.graphics,barHost,toolbarRoot,width,height,dpi/96,true);
+        if(grain){toolbarRoot.StopAnimation(L"Opacity");toolbarRoot.Opacity(1);}
+        else{toolbarRoot.StopAnimation(L"Opacity");toolbarRoot.Opacity(0);NativeInteractionMotion::Opacity(app.graphics.compositor,toolbarRoot,1.f,NativeDissolve::DurationMs);}
+        occlusionAnimating=true;if(!SetTimer(hwnd,99,NativeDissolve::DurationMs+16,nullptr))FinishToolbarOcclusion();
     }
     void SyncBarInteraction(float x,float y,int index){if(dock)return;auto region=index>=0&&index<static_cast<int>(rows.size())?NativeRegion(rows[index].rect,{0,0,width,height},NativeMetrics::ControlRadius,rows[index].enabled):NativeInteractionRegion{};barInteraction.Sync(app.graphics.compositor,toolbarRoot,region,{x-contentX,y-contentY},dpi/96,NativeMotion(app.model),dark);}
     void FinishToolbarHide(){if(!hidingToolbar)return;hidingToolbar=false;KillTimer(hwnd,99);toolbarRoot.StopAnimation(L"Offset");toolbarRoot.Offset({0,0,0});Hide(false,false);}
@@ -121,8 +136,9 @@ struct NativeBar : NativePopup
     float ExtensionTextWidth(std::wstring const &,bool bold=false);float ExtensionNaturalWidth(JsonObject const &);
     void BudgetExtensions();void PaintExtensionItem(ID2D1DeviceContext*,int);std::wstring ExtensionActionAt(int,float,bool context=false);
     void SyncExtensionMotion(NativeToolbarVisual &,JsonObject const &);void ReportExtensions(bool remove=false);
+    JsonObject dockGroupsSource{nullptr},dockGroupsView{nullptr};std::wstring dockGroupsOptions;
     bool paintedTransparentToolbar=false,toolbarCoveredByApplication=false;
-    bool TransparentToolbar()const{return !dock&&Bool(app.model.preferences,L"transparentToolbar")&&!toolbarCoveredByApplication;}
+    bool TransparentToolbar()const{return !dock&&!NativeLowPower(app.model)&&Bool(app.model.preferences,L"transparentToolbar")&&!toolbarCoveredByApplication;}
     bool ToolbarCoveredByApplication()const{
         auto display=MonitorFromRect(&full,MONITOR_DEFAULTTONEAREST);MONITORINFO info{sizeof(info)};
         if(!GetMonitorInfoW(display,&info))return false;
@@ -160,7 +176,7 @@ struct NativeBar : NativePopup
     float MeasureToolbarText(std::wstring const &,float);
     JsonArray ToolbarContent(JsonObject const &);float ToolbarContentWidth(JsonObject const &);float ToolbarMetricWidth(JsonObject const &);
     void PaintToolbarItem(ID2D1DeviceContext *,int);void PaintDockItem(ID2D1DeviceContext *,int,bool retainedMedia=false);void SyncDockState(NativeToolbarVisual &,int,float);void SyncMediaTitle(NativeToolbarVisual &,int,float);void SyncMediaSize(NativeToolbarVisual &,int,float,bool);
-    void Release(){occlusionAnimating=false;if(toolbarRoot){toolbarRoot.StopAnimation(L"Opacity");toolbarRoot.Opacity(1);}ResetDockBodyMotion();barInteraction.Release(toolbarRoot);dockDissolve.Reset(barHost,toolbarRoot);if(toolbarRoot)ReleaseNativeGlass(toolbarRoot,materialVisual);NativePopup::Release();if(toolbarLayer)toolbarLayer.Children().RemoveAll();toolbarVisuals.clear();dockHoverTop.clear();dockHoverAxis=-FLT_MAX;dockRegionItems.clear();dockRegionDpi=0;toolbarSvg.documents.clear();toolbarBackgroundKey.clear();dropId.clear();dropRows.clear();dropUntil=0;if(hwnd){KillTimer(hwnd,97);KillTimer(hwnd,99);KillTimer(hwnd,103);KillTimer(hwnd,DockPreviewTimer);KillTimer(hwnd,105);edgePointerWatch=false;}hidingToolbar=false;if(toolbarRoot){toolbarRoot.StopAnimation(L"Offset");toolbarRoot.Offset({0,0,0});}}
+    void Release(){NativeToolbarContrastWork::Cancel(contrastWork);if(hwnd)KillTimer(hwnd,NativeToolbarContrast::Timer);contrastScheduled=false;toolbarInk.clear();toolbarContrast.available=false;occlusionAnimating=false;if(toolbarRoot){toolbarRoot.StopAnimation(L"Opacity");toolbarRoot.Opacity(1);}ResetDockBodyMotion();barInteraction.Release(toolbarRoot);dockDissolve.Reset(barHost,toolbarRoot);if(toolbarRoot)ReleaseNativeGlass(toolbarRoot,materialVisual);NativePopup::Release();if(toolbarLayer)toolbarLayer.Children().RemoveAll();toolbarVisuals.clear();dockHoverTop.clear();dockHoverAxis=-FLT_MAX;dockRegionItems.clear();dockRegionDpi=0;toolbarSvg.documents.clear();toolbarBackgroundKey.clear();dropId.clear();dropRows.clear();dropUntil=0;if(hwnd){KillTimer(hwnd,97);KillTimer(hwnd,99);KillTimer(hwnd,103);KillTimer(hwnd,DockPreviewTimer);KillTimer(hwnd,105);edgePointerWatch=false;}hidingToolbar=false;if(toolbarRoot){toolbarRoot.StopAnimation(L"Offset");toolbarRoot.Offset({0,0,0});}}
     std::wstring batteryMeasureText;float batteryMeasureWidth=0;
     std::wstring lastPage;int pageAlpha=100;bool pageWaiting=false;
     std::vector<JsonObject> entries;
@@ -312,14 +328,15 @@ struct NativeBar : NativePopup
 struct NativeShell
 {
     App &app;
+    std::unique_ptr<NativeWindowClose::Controller> captionClose;
     std::map<std::wstring, std::unique_ptr<NativeBar>> bars;
     std::map<std::wstring, Icon> icons;std::map<std::wstring,float> luminances;
     std::set<std::wstring> pending;
     std::unique_ptr<NativePopup> toast;
     double lastVolume = -1;
     bool hintsInitialized = false, lastPaused = false;
-    std::wstring lastPlayer, lastNotification;
-    std::map<std::wstring, double> lastBrightness;
+    std::wstring lastPlayer, lastNotification, lastInputNotice;
+    magic::feedback::BrightnessFeedbackCursor brightnessFeedback;
     std::map<std::wstring, std::wstring> lastWorkspaces;
     std::map<std::wstring, double> brightness;
     size_t iconBytes = 0;
@@ -340,9 +357,15 @@ struct NativeShell
     HWND movingWindow=nullptr;
     bool geometryQueued=false,geometryDeferred=false;
     void ScheduleGeometry(){if(!stopping&&!geometryQueued&&app.relay){geometryQueued=true;PostMessageW(app.relay,WM_APP+22,0,0);}}
-    static void CALLBACK WindowEvent(HWINEVENTHOOK,DWORD event,HWND window,LONG object,LONG child,DWORD,DWORD){
+    static void CALLBACK WindowEvent(HWINEVENTHOOK,DWORD event,HWND window,LONG object,LONG child,DWORD,DWORD time){
         auto owner=eventOwner;if(!owner||owner->stopping)return;
+        if(owner->captionClose)owner->captionClose->Event(event,window,object,child,time);
         if(event==EVENT_OBJECT_LOCATIONCHANGE&&(object!=OBJID_WINDOW||child!=CHILDID_SELF||window!=GetForegroundWindow()))return;
+        if(event==EVENT_OBJECT_HIDE||event==EVENT_OBJECT_DESTROY||event==EVENT_OBJECT_SHOW){
+            if(object!=OBJID_WINDOW||child!=CHILDID_SELF||!owner->authoritative)return;
+            bool tracked=false;for(auto const &v:owner->authoritative.GetNamedArray(L"appWindows",JsonArray{}))if(reinterpret_cast<HWND>(static_cast<INT_PTR>(Num(v.GetObject(),L"hwnd")))==window){tracked=true;break;}
+            if(!tracked)return;
+        }
         if(event==EVENT_SYSTEM_MOVESIZESTART)owner->movingWindow=window;
         if(event==EVENT_SYSTEM_MOVESIZEEND){owner->movingWindow=nullptr;for(auto const &[_,bar]:owner->bars)bar->reservationDirty=true;}
         if(event==EVENT_SYSTEM_FOREGROUND||event==EVENT_SYSTEM_MINIMIZEEND)for(auto const &[_,bar]:owner->bars)bar->InvalidateDockBackdrop();
@@ -419,7 +442,7 @@ struct NativeShell
         if(!provisionalOrder.empty()){auto owner=std::find_if(bars.begin(),bars.end(),[&](auto const &v){return v.second->hwnd==provisionalOwner;});if(owner!=bars.end()&&owner->second->dock)dock=ToolbarOrderModel(dock,provisionalOrder);}
         data.Insert(L"dock",dock);
     }
-    std::map<std::wstring,std::wstring> iconSources;
+    std::map<std::wstring,std::wstring> iconSources,resolvedExecutables;
     std::set<std::wstring> refreshIcons;
     static std::wstring IconSource(JsonObject const &item){
         auto windows=item.GetNamedArray(L"windows",JsonArray{});
@@ -465,6 +488,7 @@ struct NativeShell
         }
         std::erase_if(refreshIcons,[&](auto const &key){return !sources.contains(key);});
         std::erase_if(pending,[&](auto const &key){return !sources.contains(key);});
+        std::erase_if(resolvedExecutables,[&](auto const &pair){return !sources.contains(pair.first)||!iconSources.contains(pair.first)||sources.at(pair.first)!=iconSources.at(pair.first);});
         iconSources=std::move(sources);
         double volume = Num(data, L"volume", -1);
         auto flyouts = ShellObject(data, L"flyouts");
@@ -511,6 +535,7 @@ struct NativeShell
         auto notification = notificationValue && notificationValue.ValueType() == JsonValueType::Object
                                 ? notificationValue.GetObject()
                                 : JsonObject{};
+        auto inputNotice = ShellObject(data,L"inputNotice");
         if (hintsInitialized && Bool(flyouts, L"enabled", true))
         {
             if (Bool(flyouts, L"showMediaPlayerChange", true) && !Str(player, L"key").empty() &&
@@ -518,19 +543,22 @@ struct NativeShell
                 Info(data, Str(player, L"title"), Str(player, L"detail"), L"@magic/media-popup");
             if (Bool(flyouts, L"showNotifications", true) && !Str(notification, L"key").empty() &&
                 lastNotification != Str(notification, L"key"))
-                Info(data, Str(notification, L"title"), Str(notification, L"detail"), L"@magic/notifications");
+                Toast(data,Str(notification,L"title"),-1,Str(notification,L"detail"),L"@magic/notifications",L"",Str(notification,L"key"),Str(notification,L"appId"));
             if (lastPaused != Bool(data, L"shortcutsPaused"))
                 Info(data, L"快捷键", Bool(data, L"shortcutsPaused") ? L"已暂停" : L"已恢复", L"");
+            if (!Str(inputNotice,L"key").empty() && lastInputNotice != Str(inputNotice,L"key"))
+                Info(data, Str(inputNotice,L"title"), Str(inputNotice,L"detail"), L"@magic/keyboard-selector");
         }
         lastPlayer = Str(player, L"key");
         lastNotification = Str(notification, L"key");
+        lastInputNotice = Str(inputNotice,L"key");
         lastPaused = Bool(data, L"shortcutsPaused");
-        std::map<std::wstring,double> brightness;
-        for(auto const &v:ShellObject(data,L"brightness").GetNamedArray(L"displays",JsonArray{})){
-            auto row=v.GetObject();auto id=Str(row,L"id");double level=Num(row,L"value",-1);if(level<0||level>1)continue;brightness[id]=level;
-            if(hintsInitialized&&lastBrightness.contains(id)&&std::abs(lastBrightness[id]-level)>.001&&Bool(flyouts,L"enabled",true)&&Bool(flyouts,L"showBrightnessChange",true))Toast(data,L"亮度",level,L"",L"",id);
+        auto brightnessNotice=ShellObject(ShellObject(data,L"brightness"),L"feedback");
+        bool brightnessAllowed=hintsInitialized&&Bool(flyouts,L"enabled",true)&&Bool(flyouts,L"showBrightnessChange",true);
+        if(brightnessFeedback.Consume(Str(brightnessNotice,L"key"),Num(brightnessNotice,L"timestampMs"),GetTickCount64(),brightnessAllowed)){
+            double level=Num(brightnessNotice,L"value",-1);auto id=Str(brightnessNotice,L"displayId");
+            if(!id.empty()&&std::isfinite(level)&&level>=0&&level<=1)Toast(data,L"亮度",level,L"",L"",id);
         }
-        lastBrightness = std::move(brightness);
         std::map<std::wstring, std::wstring> workspaces;
         if (data.HasKey(L"workspaces"))
             for (auto const &entry : data.GetNamedObject(L"workspaces"))
@@ -552,23 +580,29 @@ struct NativeShell
     {
         Toast(snapshot,title,-1,detail.empty()?title:detail,widget);
     }
-    void Toast(JsonObject const &snapshot,std::wstring const &label,double value,std::wstring text=L"",std::wstring widget=L"",std::wstring displayId=L"")
+    void Toast(JsonObject const &snapshot,std::wstring const &label,double value,std::wstring text=L"",std::wstring widget=L"",std::wstring displayId=L"",std::wstring notificationId=L"",std::wstring appId=L"")
     {
         if(NativeNotificationMuted(snapshot,widget,value))return;
         if(bars.empty())return;NativeBar *bar=nullptr;auto focused=Str(ShellObject(snapshot,L"focused"),L"monitor");
         for(auto const &[id,candidate]:bars)if(!candidate->dock&&(!bar||candidate->monitor==focused))bar=candidate.get();
         if(!bar)bar=bars.begin()->second.get();if(!bar->hwnd)return;if(!toast)toast=std::make_unique<NativePopup>(app);
         auto levelKind=value<0?L"info":label==L"亮度"?L"brightness":L"volume";
-        if(toast->visible&&!toast->dismissing&&value>=0&&Str(toast->Data(),L"levelKind")==levelKind&&Str(toast->Data(),L"displayId")==displayId){
+        auto placement=ShellObject(app.model.preferences,L"notificationPlacement");
+        std::wstring placementStamp=placement.Stringify().c_str();auto interaction=NativeHintPlacement::Interaction();
+        bool samePosition=NativeHintPlacement::Reuse(toast->flyoutDragging,Bool(placement,L"autoSwitch",true),Str(toast->Data(),L"hintPlacementStamp")==placementStamp,MonitorFromWindow(toast->hwnd,MONITOR_DEFAULTTONULL),interaction);
+        if(toast->visible&&!toast->dismissing&&samePosition&&value>=0&&Str(toast->Data(),L"levelKind")==levelKind&&Str(toast->Data(),L"displayId")==displayId){
             KillTimer(toast->hwnd,84);if(!toast->flyoutDragging)SetTimer(toast->hwnd,84,4200,nullptr);
             if(!toast->flyoutDragging&&!toast->flyoutInFlight&&!toast->flyoutPending){if(GetTickCount64()<toast->flyoutEchoUntil&&std::abs(value-Num(toast->Data(),L"value"))>.0051)return;toast->flyoutEchoUntil=0;Put(toast->Data(),L"value",value);Put(toast->Data(),L"title",label+L" "+std::to_wstring(static_cast<int>(std::lround(value*100)))+L"%");toast->caption=Str(toast->Data(),L"title");toast->BuildRows();toast->Draw();}return;
         }
         JsonObject packet,payload,position,data,account;Put(packet,L"kind",std::wstring(L"@magic/flyouts"));Put(packet,L"token",std::wstring(L"passive"));
-        MONITORINFO screen{sizeof(screen)};GetMonitorInfoW(MonitorFromRect(&bar->full,MONITOR_DEFAULTTONEAREST),&screen);
-        Put(position,L"x",static_cast<double>((screen.rcWork.left+screen.rcWork.right)/2));Put(position,L"y",static_cast<double>(screen.rcWork.top+12*bar->dpi/96));
-        payload.Insert(L"desiredPosition",position);Put(payload,L"alignX",std::wstring(L"Center"));packet.Insert(L"payload",payload);
+        std::vector<NativeHintPlacement::Monitor> screens;EnumDisplayMonitors(nullptr,nullptr,NativeHintPlacement::Enumerate,reinterpret_cast<LPARAM>(&screens));if(screens.empty())return;
+        auto selected=NativeHintPlacement::Select(screens,placement,interaction);
+        for(auto const &[key,candidate]:bars)if(candidate->hwnd&&MonitorFromWindow(candidate->hwnd,MONITOR_DEFAULTTONEAREST)==screens[selected].handle){screens[selected].dpi=GetDpiForWindow(candidate->hwnd);break;}
+        payload=NativeHintPlacement::Position(placement,screens[selected]);packet.Insert(L"payload",payload);
         Put(data,L"title",value>=0?label+L" "+std::to_wstring(static_cast<int>(std::lround(value*100)))+L"%":label);
         if(text.size()>32768)text.resize(32768);Put(data,L"text",text);Put(data,L"value",value);Put(data,L"levelKind",std::wstring(levelKind));Put(data,L"levelLabel",label);Put(data,L"displayId",displayId);
+        Put(data,L"hintPlacementStamp",placementStamp);
+        data.Insert(L"openSource",JsonValue::CreateBooleanValue(!notificationId.empty()&&!appId.empty()));
         Put(data,L"sourceWidget",widget);data.Insert(L"canOpen",JsonValue::CreateBooleanValue(!widget.empty()));data.Insert(L"dark",JsonValue::CreateBooleanValue(Bool(snapshot,L"dark",Preview70Theme::systemDark)));
         Put(data,L"duration",label==L"已复制图片"?1400:std::clamp(Num(ShellObject(snapshot,L"flyouts"),L"timeToShow",4)*1000,1000.,10000.));data.Insert(L"rows",JsonArray{});
         Put(data,L"levelKind",std::wstring(levelKind));packet.Insert(L"data",data);packet.Insert(L"account",account);toast->passiveClick={};toast->Show(packet);
@@ -578,8 +612,9 @@ struct NativeShell
             JsonObject r;Put(r,L"op",std::wstring(L"flyout-adjust"));Put(r,L"mode",mode);Put(r,L"displayId",displayId);Put(r,L"value",n);r.Insert(L"feedback",JsonValue::CreateBooleanValue(feedback));Put(r,L"window",static_cast<double>(reinterpret_cast<UINT_PTR>(self->hwnd)));
             app.Request(r,[done](JsonObject const &reply){auto result=reply.GetNamedObject(L"result",JsonObject{});double actual=Num(result,L"value",-1);done(Bool(reply,L"ok")&&Bool(result,L"accepted")&&std::isfinite(actual)&&actual>=0&&actual<=1,actual);});
         };
-        if(!widget.empty())toast->passiveClick=[this,widget]{
-            JsonObject command,r;Put(command,L"id",std::wstring(L""));Put(command,L"widget",widget);
+        if(!widget.empty())toast->passiveClick=[this,widget,notificationId,appId]{
+            JsonObject command,r;Put(command,L"id",std::wstring(L""));
+            if(!notificationId.empty()&&!appId.empty()){Put(command,L"verb",std::wstring(L"notification-open"));Put(command,L"notificationId",notificationId);Put(command,L"appId",appId);}else Put(command,L"widget",widget);
             auto bar=bars.begin()->second.get();Put(r,L"op",std::wstring(L"shell-command"));Put(r,L"window",static_cast<double>(reinterpret_cast<UINT_PTR>(bar->hwnd)));r.Insert(L"command",command);AllowSetForegroundWindow(static_cast<DWORD>(Num(bar->data,L"hostPid")));app.Request(r);
         };
     }
@@ -634,6 +669,7 @@ struct NativeShell
                 auto row = value.GetObject();
                 auto key = Str(row, L"key"), png = Str(row, L"png");
                 if(!iconSources.contains(key)||!requestedSources.contains(key)||iconSources[key]!=requestedSources.at(key)){pending.erase(key);continue;}
+                auto resolved=Str(row,L"iconExecutable");if(!resolved.empty()&&resolved.size()<=32768&&resolvedExecutables[key]!=resolved){resolvedExecutables[key]=resolved;updated=true;}
                 if (png.empty())
                     continue;
                 DWORD size = 0;
@@ -656,18 +692,11 @@ struct NativeShell
                 check_hresult(frame->GetSize(&w, &h));
                 if (w > 256 || h > 256 || !w || !h)
                     continue;
+                auto raster=NativeIconRaster(app.graphics.wic.get(),frame.get(),w,h);
                 size_t allocation = static_cast<size_t>(w) * h * 4;
-                while (!icons.empty() && (icons.size() >= 128 || iconBytes + allocation > 8 * 1024 * 1024))
-                {
-                    auto old = std::min_element(icons.begin(), icons.end(), [](auto const &a, auto const &b) {
-                        return a.second.age < b.second.age;
-                    });
-                    iconBytes -= old->second.bytes;luminances.erase(old->first);
-                    icons.erase(old);
-                }
                 com_ptr<IWICFormatConverter> converter;
                 check_hresult(app.graphics.wic->CreateFormatConverter(converter.put()));
-                check_hresult(converter->Initialize(frame.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
+                check_hresult(converter->Initialize(raster.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
                                                     nullptr, 0, WICBitmapPaletteTypeCustom));
                 com_ptr<ID2D1DeviceContext> context;
                 check_hresult(app.graphics.d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, context.put()));
@@ -676,7 +705,11 @@ struct NativeShell
                 std::vector<BYTE> pixels(static_cast<size_t>(w)*h*4);if(SUCCEEDED(converter->CopyPixels(nullptr,w*4,static_cast<UINT>(pixels.size()),pixels.data()))){double sum=0;for(size_t k=0;k<pixels.size();k+=4){double alpha=pixels[k+3];if(alpha>0)sum+=(.299*pixels[k+2]+.587*pixels[k+1]+.114*pixels[k])*255/alpha;}luminances[key]=static_cast<float>(sum/(w*h));}
                 icon.bytes = allocation;
                 icon.age = ++iconAge;
-                if(auto old=icons.find(key);old!=icons.end())iconBytes-=old->second.bytes;
+                if(auto old=icons.find(key);old!=icons.end()){iconBytes-=old->second.bytes;icons.erase(old);}
+                while(!icons.empty()&&(icons.size()>=NativeIconEntries||iconBytes+allocation>IconLimit)){
+                    auto old=std::min_element(icons.begin(),icons.end(),[](auto const &a,auto const &b){return a.second.age<b.second.age;});
+                    iconBytes-=old->second.bytes;luminances.erase(old->first);icons.erase(old);
+                }
                 refreshIcons.erase(key);iconBytes += allocation;
                 icons[key] = std::move(icon);
                 pending.erase(key);
@@ -684,8 +717,7 @@ struct NativeShell
             }
             if (updated)
                 for (auto const &[id, bar] : bars)
-                    if (!bar->edge)
-                        bar->Draw();
+                    if (!bar->edge){bar->Layout();bar->Draw();}
             RequestIcons();
         });
     }
@@ -810,7 +842,9 @@ inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &scre
         for(auto const &entry:entries)if(entry.HasKey(L"windows"))for(auto const &v:entry.GetNamedArray(L"windows")){auto window=v.GetObject();auto id=static_cast<long long>(Num(window,L"hwnd"));live.insert(id);if((Str(window,L"attention")==L"Flashing"||Str(window,L"attention")==L"Highlighted")&&id!=focused){flashing|=Str(window,L"attention")==L"Flashing";attentionWindows.insert(id);}}
         std::erase_if(attentionWindows,[&](long long id){return !live.contains(id)||id==focused;});if(mode!=L"UntilActivated")attentionWindows.clear();attentionReveal=mode==L"WhileFlashing"?flashing:mode==L"UntilActivated"&&!attentionWindows.empty();if(attentionReveal)Reveal();
     }
+    bool wasCovered=toolbarCoveredByApplication,wasOccluded=toolbarOccluded;
     if(!dock)toolbarCoveredByApplication=Bool(app.model.preferences,L"transparentToolbar")&&ToolbarCoveredByApplication();
+    bool desktopReveal=!dock&&surface&&wasCovered&&!toolbarCoveredByApplication&&Bool(app.model.preferences,L"transparentToolbar");
     bool fullscreen=ForegroundFullscreen();
     // Read geometry at the event, rather than trusting a cached focus payload.
     // A valid created bar is ready even while a fullscreen entrance overlay
@@ -859,6 +893,7 @@ inline void NativeBar::Update(JsonObject const &snapshot, JsonObject const &scre
                              std::to_string(Num(snapshot.GetNamedObject(L"focused"), L"hwnd")) ||
                   !surface))
         Draw();
+    if(desktopReveal&&!wasOccluded&&!occlusionAnimating)RevealToolbarDesktop();
     if(dock&&dockEnterPending&&!edge){dockEnterPending=false;StartDockEntrance();}
     if(dock&&menuOpen&&!menuItemKey.empty()&&app.menus&&app.menus->visibleLevels==1&&!(GetAsyncKeyState(VK_LBUTTON)&0x8000)){
         for(size_t i=0;i<rows.size()&&i<entries.size();++i)if(rows[i].id==menuItemKey&&JumpStamp(entries[i])!=menuJumpStamp){Menu(static_cast<int>(i),true);break;}
@@ -869,8 +904,14 @@ inline std::vector<JsonObject> NativeBar::GroupItems(wchar_t const *section,Json
     std::vector<JsonObject> result;
     auto source=projected?projected:data.GetNamedObject(dock?L"dock":L"toolbar");
     if(!projected&&barDrag)source=NativeShell::ToolbarOrderModel(source,dragOrder);
+    if(dock&&!Bool(source,L"groupedRunningApps")){
+        auto options=monitor+L":"+std::to_wstring(primary)+L":"+Str(settings,L"temporalItemsVisibility")+L":"+Str(settings,L"pinnedItemsVisibility")+L":"+std::to_wstring(Bool(app.model.preferences,L"dockRunningSeparator",true));
+        if(get_abi(source)!=get_abi(dockGroupsSource)||options!=dockGroupsOptions){dockGroupsSource=source;dockGroupsOptions=options;dockGroupsView=NativeDockGroups::Project(source,settings,monitor,primary,Bool(app.model.preferences,L"dockRunningSeparator",true));}
+        source=dockGroupsView;
+    }
     for(auto const &v:source.GetNamedArray(section)){
         auto item=JsonObject::Parse(v.GetObject().Stringify());
+        auto identityKey=Str(item,L"key");if(identityKey.empty())identityKey=Str(item,L"id");auto identity=shell.resolvedExecutables.find(identityKey);if(identity!=shell.resolvedExecutables.end())Put(item,L"iconExecutable",identity->second);
         if(Str(item,L"nativeModule")==L"magic.recycle")Put(item,L"trashCount",app.model.recycleFull?1.0:0.0);
         if(!dock&&Str(item,L"type")==L"Extension"&&(!Bool(item,L"extensionReady")||(extensionWidthsReady&&extensionWidths.contains(Str(item,L"id"))&&extensionWidths[Str(item,L"id")]<=0)))continue;
         if(dock&&!primary&&Str(settings,L"pinnedItemsVisibility")==L"WhenPrimary"&&Str(item,L"type")!=L"AppOrFile"&&Str(item,L"type")!=L"Uac")continue;
@@ -992,7 +1033,7 @@ inline void NativeBar::Layout()
         for(auto const &item:values){float size=ItemWidth(item);PopupRow row;
             if(Str(item,L"key")==L"@boundary:right"&&groups[2].empty())x-=gap;
             row.id=Str(item,L"visualId").empty()?(dock?Str(item,L"key"):Str(item,L"id")):Str(item,L"visualId");row.key=row.id;row.label=Bool(item,L"dockClock")?ToolbarClock(data):Str(item,L"label");
-            row.rect=Vertical()?D2D1_RECT_F{padding,x,width-padding,x+size-gap}:D2D1_RECT_F{x,padding,x+size-(dock?gap:0),height-padding};row.enabled=true;row.control=Str(item,L"id")==L"@magic/drag-gap"?L"drag-gap":Str(item,L"type")==L"Separator"?L"bar-separator":L"";
+            row.rect=Vertical()?D2D1_RECT_F{padding,x,width-padding,x+size-gap}:D2D1_RECT_F{x,padding,x+size-(dock?gap:0),height-padding};row.enabled=!Bool(item,L"automaticRunningSeparator");row.control=Str(item,L"id")==L"@magic/drag-gap"?L"drag-gap":Str(item,L"type")==L"Separator"?L"bar-separator":L"";
             row.offscreen=Vertical()?(row.rect.bottom<=padding||row.rect.top>=height-padding):(row.rect.right<=padding||row.rect.left>=width-padding);
             auto copy=item;Put(copy,L"section",std::wstring(section));rows.push_back(row);entries.push_back(copy);x+=size;
             if(row.key==L"@boundary:left"&&groups[0].empty())x-=gap;
@@ -1019,7 +1060,10 @@ inline bool NativeBar::MoveToolbarDrag(float x,float y)
     bool started=!barDrag,changed=false;float oldScroll=barScroll;
     if(!barDrag){
         auto found=std::find_if(rows.begin(),rows.end(),[&](auto const &r){return r.id==downId;});if(found==rows.end())return false;
-        int i=static_cast<int>(found-rows.begin());if(found->id==L"@magic/pages"||found->control==L"corner"||Str(entries[i],L"type")==L"Recovery"||Str(entries[i],L"key")==L"@magic/recovery-separator")return false;
+        int i=static_cast<int>(found-rows.begin());if(found->id==NativeDockGroups::Separator||found->id==L"@magic/pages"||found->control==L"corner"||Str(entries[i],L"type")==L"Recovery"||Str(entries[i],L"key")==L"@magic/recovery-separator")return false;
+        // Individual tray applications are reordered only inside the tray popup.
+        // Never turn dragging one into a whole-module reorder or a later click.
+        if(!dock&&Str(entries[i],L"type")==L"Tray"){pointerCancelled=true;downId.clear();down=-1;KillTimer(hwnd,98);return false;}
         dragId=Str(entries[i],dock?L"commandId":L"module");if(dragId.empty())dragId=dock?Str(entries[i],L"key"):found->id;
         dragEntries.clear();dragRects.clear();float left=Vertical()?height:width,right=0;
         for(size_t j=0;j<entries.size();++j)if(rows[j].id==dragId||Str(entries[j],dock?L"key":L"module")==dragId){dragEntries.push_back(entries[j]);dragRects.push_back(rows[j].rect);left=std::min(left,Vertical()?rows[j].rect.top:rows[j].rect.left);right=std::max(right,Vertical()?rows[j].rect.bottom:rows[j].rect.right);dragSection=Str(entries[j],L"section");dragIndex=static_cast<int>(Num(entries[j],L"configurationIndex"));}
@@ -1081,7 +1125,7 @@ inline void NativeBar::EndToolbarDrag(bool commit)
 inline void NativeBar::PaintPreview70(ID2D1DeviceContext *c)
 {
     NativePaint p(c,app.graphics,dark);
-    float radius=dock?(Num(settings,L"margin")>0||Str(settings,L"mode")!=L"FullWidth"?16.f:0.f):Num(settings,L"margin")>0?height*.3f:0.f;if(dock)p.Material({0,0,width,height},NativeMaterial::Dock,Glass(),radius);else if(!TransparentToolbar())p.Material({0,0,width,height},NativeMaterial::Menu,Glass(),radius);
+    float radius=dock?(Num(settings,L"margin")>0||Str(settings,L"mode")!=L"FullWidth"?16.f:0.f):Num(settings,L"margin")>0?height*.3f:0.f;if(dock)p.Material({0,0,width,height},NativeMaterial::Dock,Glass(),radius);else if(!TransparentToolbar())p.Material({0,0,width,height},NativeMaterial::Menu,Glass(),radius,false,Bool(app.model.preferences,L"toolbarOutline",true));
     if(TransparentToolbar()&&Bool(app.model.preferences,L"transparentToolbarMask")){
         float tint=Bool(data,L"dark",Preview70Theme::systemDark)?1.f:0.f;
         D2D1_GRADIENT_STOP stops[]={{0,{tint,tint,tint,.22f}},{.35f,{tint,tint,tint,.16f}},{.7f,{tint,tint,tint,.06f}},{1,{tint,tint,tint,0}}};
@@ -1101,11 +1145,11 @@ inline void NativeBar::Draw()
     NativeRenderScope rendering(app.relay);if(!rendering){if(hwnd)InvalidateRect(hwnd,nullptr,FALSE);return;}
     if (gridSuppressed || !visible || edge || !hwnd)
         return;
-    paintedTransparentToolbar=TransparentToolbar();dark=paintedTransparentToolbar?!Bool(data,L"dark",Preview70Theme::systemDark):Bool(data,L"dark",Preview70Theme::systemDark);
+    paintedTransparentToolbar=TransparentToolbar();dark=Bool(data,L"dark",Preview70Theme::systemDark);ScheduleToolbarContrast();
     if(dock&&dockBackdropDirty){if(materialVisual){materialVisual.Brush(nullptr);materialVisual.Comment(L"");}dockBackdropDirty=false;}
     if(dock)SyncNativeGlass(app.graphics,hwnd,toolbarRoot,materialVisual,{0,0,width,height},dpi/96,(Num(settings,L"margin")>0||Str(settings,L"mode")!=L"FullWidth"?16.f:0.f),NativeMaterial::Dock,!NativeLowPower(app.model),visual);
     else SyncNativeGlass(app.graphics,hwnd,toolbarRoot,materialVisual,{0,0,width,height},dpi/96,Num(settings,L"margin")>0?height*.3f:0.f,NativeMaterial::Menu,!paintedTransparentToolbar&&!NativeLowPower(app.model),visual);
-    {SyncToolbarVisuals();auto key=std::to_wstring(width)+L":"+std::to_wstring(height)+L":"+std::to_wstring(dpi)+L":"+std::to_wstring(dark)+L":"+std::to_wstring(-1)+L":"+std::to_wstring(!downId.empty())+L":"+std::to_wstring(rows.empty())+L":"+std::to_wstring(Preview70Theme::revision)+L":"+std::to_wstring(Glass())+L":"+std::to_wstring(paintedTransparentToolbar)+L":"+std::to_wstring(Bool(app.model.preferences,L"transparentToolbarMask"));if(key==toolbarBackgroundKey&&surface){ApplyDockReflow();return;}toolbarBackgroundKey=key;}
+    {SyncToolbarVisuals();auto key=std::to_wstring(width)+L":"+std::to_wstring(height)+L":"+std::to_wstring(dpi)+L":"+std::to_wstring(dark)+L":"+std::to_wstring(-1)+L":"+std::to_wstring(!downId.empty())+L":"+std::to_wstring(rows.empty())+L":"+std::to_wstring(Preview70Theme::revision)+L":"+std::to_wstring(Glass())+L":"+std::to_wstring(paintedTransparentToolbar)+L":"+std::to_wstring(Bool(app.model.preferences,L"transparentToolbarMask"))+L":"+std::to_wstring(Bool(app.model.preferences,L"toolbarOutline",true));if(key==toolbarBackgroundKey&&surface){ApplyDockReflow();return;}toolbarBackgroundKey=key;}
     RECT rect{};
     GetClientRect(hwnd, &rect);
     int w = dock?static_cast<int>(std::ceil(width*dpi/96)):rect.right, h = dock?static_cast<int>(std::ceil(height*dpi/96)):rect.bottom;
@@ -1149,7 +1193,7 @@ inline void NativeBar::Send(int index, std::wstring verb, long long target, std:
 {
     AllowSetForegroundWindow(static_cast<DWORD>(Num(data, L"hostPid")));
     app.inputEpoch++;
-    if (index < 0 || index >= static_cast<int>(rows.size()) || !rows[index].enabled)
+    if (index < 0 || index >= static_cast<int>(rows.size()) || index >= static_cast<int>(entries.size()) || !rows[index].enabled)
         return;
     if(rows[index].id==L"@magic/pages"){
         if(auto board=PageBoard()){HMENU menu=CreatePopupMenu();int id=1;for(auto const &page:board->pages){auto title=L"第 "+std::to_wstring(id)+L" 页";AppendMenuW(menu,MF_STRING|(page==board->pageId?MF_CHECKED:0),id++,title.c_str());}POINT point{};GetCursorPos(&point);SetForegroundWindow(hwnd);int choice=TrackPopupMenu(menu,TPM_RETURNCMD,point.x,point.y,0,hwnd,nullptr);DestroyMenu(menu);if(choice>0&&choice<=static_cast<int>(board->pages.size())){JsonObject request;Put(request,L"op",std::wstring(L"page"));Put(request,L"board",board->id);Put(request,L"page",board->pages[choice-1]);app.Request(request);}}
@@ -1168,13 +1212,19 @@ inline void NativeBar::Send(int index, std::wstring verb, long long target, std:
     if(!target&&dock&&entries[index].HasKey(L"windows")&&entries[index].GetNamedArray(L"windows").Size()==1)target=static_cast<long long>(Num(entries[index].GetNamedArray(L"windows").GetAt(0).GetObject(),L"hwnd"));
     Put(command, L"target", static_cast<double>(target));
     Put(command, L"destination", destination);
-    auto rect = rows[index].rect;auto compound=CompoundOwner(entries[index]);if(!dock&&!compound.empty())for(auto const &r:rows)if(r.id==compound+L":parent"){rect=r.rect;break;}
+    auto rect = rows[index].rect;auto compound=CompoundOwner(entries[index]);if(!dock&&Str(entries[index],L"type")!=L"Tray"&&!compound.empty())for(auto const &r:rows)if(r.id==compound+L":parent"){rect=r.rect;break;}
     Put(command, L"x", static_cast<double>(full.left + (dock?rect.right:(rect.left+rect.right)/2) * dpi / 96));
     auto side=Str(settings,L"position");float margin=static_cast<float>(Num(settings,L"margin"))*dpi/96;
     Put(command,L"x",static_cast<double>(std::lround(full.left+(rect.left+rect.right)*dpi/192)));
     Put(command,L"y",static_cast<double>(std::lround(side==L"Bottom"?full.top-margin:full.bottom+margin)));
     if(dock&&Vertical()){Put(command,L"x",static_cast<double>(std::lround(side==L"Left"?full.right+margin:full.left-margin)));Put(command,L"y",static_cast<double>(std::lround(full.top+(rect.top+rect.bottom)*dpi/192)));}
     auto entry = entries[index];
+    // Some tray clients open menus on left/double/middle click too. Arm before
+    // dispatch, using the same physical anchor sent to the real tray callback.
+    if(!dock&&Str(entry,L"type")==L"Tray"&&(verb==L"activate"||verb==L"double"||verb==L"context"||verb==L"middle")){
+        POINT trigger{static_cast<LONG>(Num(command,L"x")),static_cast<LONG>(Num(command,L"y"))};
+        TrayMenuAnchor().Arm(reinterpret_cast<HWND>(static_cast<UINT_PTR>(Num(entry,L"ownerHwnd"))),trigger,side==L"Bottom",full);
+    }
     auto focused = reinterpret_cast<UINT_PTR>(GetForegroundWindow());
     bool was = false;
     if (entry.HasKey(L"windows"))
@@ -1192,7 +1242,7 @@ inline void NativeBar::Send(int index, std::wstring verb, long long target, std:
 inline void NativeBar::Activate(int index)
 {
     if(index>=0&&index<static_cast<int>(entries.size())&&Str(entries[index],L"type")==L"Recovery"){OpenDesktopRecovery(app,hwnd);return;}
-    if(index>=0&&index<static_cast<int>(entries.size())&&Str(entries[index],L"type")==L"Music"){if(NativeMusicLayout::Enabled(entries[index],1))Send(index,L"play");return;}
+    if(index>=0&&index<static_cast<int>(entries.size())&&Str(entries[index],L"type")==L"Music"){Send(index);return;}
     if(index>=0&&index<static_cast<int>(entries.size())&&Str(entries[index],L"type")==L"Media"){if(Bool(entries[index],L"hasPlayer"))Send(index,L"open-source");return;}
     if(index>=0&&index<static_cast<int>(entries.size())&&Bool(entries[index],L"corner")){SendBar(L"show-desktop");return;}
     if(index>=0&&index<static_cast<int>(entries.size())&&Str(entries[index],L"type")==L"Separator")return;
@@ -1221,9 +1271,6 @@ inline void NativeBar::Menu(int index,bool refresh)
     bool valid=index>=0&&index<static_cast<int>(entries.size());
     if(valid&&!dock&&(rows[index].control==L"corner"||rows[index].control==L"bar-separator"))valid=false;
     if(valid&&!dock&&Str(entries[index],L"type")==L"Tray"){
-        auto rect=rows[index].rect;auto side=Str(settings,L"position");bool above=side==L"Bottom";
-        POINT trigger{static_cast<LONG>(std::lround(full.left+(rect.left+rect.right)*dpi/192)),above?full.top:full.bottom};
-        TrayMenuAnchor().Arm(reinterpret_cast<HWND>(static_cast<UINT_PTR>(Num(entries[index],L"ownerHwnd"))),trigger,above,full);
         Send(index,L"context");return;
     }
     auto item=valid?entries[index]:JsonObject{};
@@ -1264,7 +1311,7 @@ inline void NativeBar::Menu(int index,bool refresh)
         add(values,BarText(L"app_menu.edit_app_icon"),L"edit-icon",L"",true,L"",L"RiEditBoxLine");
         auto windows=item.GetNamedArray(L"windows",JsonArray{});
         if(windows.Size()){separator(values);if(Bool(data,L"devTools"))add(values,BarText(L"app_menu.copy_handles"),L"copy-handles",L"",true,L"",L"AiOutlineCopy");add(values,BarText(windows.Size()>1?L"app_menu.close_multiple":L"app_menu.close"),L"close",L"",true,L"danger",L"BiWindowClose");if(Bool(settings,L"showEndTask"))add(values,BarText(windows.Size()>1?L"app_menu.kill_multiple":L"app_menu.kill"),L"kill",L"",true,L"danger",L"MdOutlineDangerous");}
-    }else if(valid&&dock&&(Str(item,L"type")==L"Media"||Str(item,L"type")==L"Plugin"||Str(item,L"type")==L"Separator")&&!rows[index].id.starts_with(L"@boundary:")){
+    }else if(valid&&dock&&(Str(item,L"type")==L"Media"||Str(item,L"type")==L"Plugin"||Str(item,L"type")==L"Separator")&&!Bool(item,L"automaticRunningSeparator")&&!rows[index].id.starts_with(L"@boundary:")){
         if(Str(item,L"plugin")==L"@default/weg-trash-bin"){add(values,BarText(L"trash_bin.empty_bin"),L"empty-bin",L"",true,L"",L"FaRegTrashAlt");separator(values);}
         if(Str(item,L"type")==L"Plugin"&&(Str(item,L"plugin")==L"@default/weg-start-menu"||Str(item,L"plugin")==L"@default/weg-show-desktop"||Str(item,L"plugin")==L"@default/weg-trash-bin")){add(values,BarText(L"context_menu.edit_icon"),L"edit-custom-icon",L"",true,L"",L"RiEditBoxLine");separator(values);}
         add(values,BarText(Str(item,L"type")==L"Separator"?L"context_menu.remove_separator":L"context_menu.remove_module"),L"remove",L"",true,L"",L"CgExtensionRemove");
@@ -1294,7 +1341,7 @@ inline void NativeBar::Menu(int index,bool refresh)
         bool locked=!Bool(data,dock?L"reorderDock":L"reorderToolbar");
         auto lock=add(values,BarText(locked?L"context_menu.reorder_enable":L"context_menu.reorder_disable"),L"lock",L"",false,L"",dock?(locked?L"CgLockUnlock":L"CgLock"):(locked?L"VscUnlock":L"VscLock"));
         add(values,BarText(dock?L"taskbar_menu.task_manager":L"context_menu.task_manager"),L"task-manager",L"",false,L"",L"PiChartLineFill");
-        if(Str(data,L"providerProtocol")==L"Magic.System.Native/1")add(values,L"Windows 授权入口",L"windows-authorization",L"",false,L"",L"MdOutlineAdminPanelSettings");
+        if(Str(data,L"providerProtocol")==L"Magic.System.Native/1")add(values,L"临时显示Windows任务栏",L"windows-authorization",L"",false,L"",L"MdOutlineAdminPanelSettings");
         for(auto const &entry:NativeBarSettingsEntries)add(values,entry.label,entry.verb,L"",false,L"",entry.icon);
 
     }
@@ -1327,6 +1374,8 @@ inline void NativeBar::Menu(int index,bool refresh)
     };
     if(!dock){menus.rootAlignX=L"Center";menus.rootAlignY=Str(settings,L"position")==L"Bottom"?L"End":L"Start";}
     if(dock){auto side=Str(settings,L"position");menus.rootAlignX=side==L"Left"?L"Start":side==L"Right"?L"End":L"Center";menus.rootAlignY=side==L"Top"?L"Start":side==L"Bottom"?L"End":L"Center";
+        menus.barSide=side.empty()?L"Bottom":side;
+        menus.barBoundary=side==L"Top"?full.bottom:side==L"Left"?full.right:side==L"Right"?full.left:full.top;
         if(side==L"Top")menus.origin.y=full.bottom;
         else if(side==L"Left")menus.origin.x=full.right;
         else if(side==L"Right"){menus.origin.x=full.left;menus.rootAlignX=L"End";}
@@ -1352,7 +1401,7 @@ inline bool NativeBar::SuppressFullscreen(){
     if(!ForegroundFullscreen()){fullscreenSuppressed=false;return false;}
     fullscreenSuppressed=true;
     if(barDrag)EndToolbarDrag(false);
-    for(UINT_PTR timer:std::initializer_list<UINT_PTR>{91,92,93,94,98,99,100,101,102,103,105,DockPreviewTimer,DockBodyTimer})KillTimer(hwnd,timer);
+    for(UINT_PTR timer:std::initializer_list<UINT_PTR>{91,92,93,94,98,99,100,101,102,103,105,DockPreviewTimer,DockBodyTimer,NativeToolbarContrast::Timer})KillTimer(hwnd,timer);
     showPending=hidePending=hidingToolbar=edgePointerWatch=false;down=-1;downId.clear();pointerId=0;touchPrimary=false;
     if(GetCapture()==hwnd)ReleaseCapture();
     if(menuOpen){Menus(app).Close(false);menuOpen=false;}
@@ -1451,6 +1500,7 @@ inline LRESULT NativeBar::HandleMessage(HWND window,UINT message,WPARAM w,LPARAM
             if(self->toolbarOccluded)return HTTRANSPARENT;
             if(self->dock&&!self->edge){POINT point{GET_X_LPARAM(l),GET_Y_LPARAM(l)};ScreenToClient(window,&point);float x=point.x*96/self->dpi,y=point.y*96/self->dpi;
                 if(!Inside({self->contentX,self->contentY,self->contentX+self->width,self->contentY+self->height},x,y)&&self->Hit(x,y)<0)return HTTRANSPARENT;return HTCLIENT;}break;
+        case NativeToolbarContrastWork::Message:self->FinishToolbarContrast(w);return 0;
         case WM_APP+21:
             if(w==ABN_POSCHANGED&&!self->positioningBar){self->reservationDirty=true;self->shell.ScheduleGeometry();}
             else if(w==ABN_FULLSCREENAPP)self->shell.ScheduleGeometry();
@@ -1535,7 +1585,17 @@ inline LRESULT NativeBar::HandleMessage(HWND window,UINT message,WPARAM w,LPARAM
             if(self->dock&&self->menuOpen)SetTimer(window,DockPreviewTimer,250,nullptr);
             self->ScheduleHide();
             return 0;
-        case WM_LBUTTONDBLCLK:
+        case WM_LBUTTONDBLCLK: {
+            int hit=self->Hit(GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi);
+            if(!self->dock&&hit>=0&&hit<static_cast<int>(self->entries.size())&&Str(self->entries[hit],L"type")==L"Tray"){
+                // Mirror the tray popup's double-click contract. The following
+                // button-up must not replay a second single-click activation.
+                KillTimer(window,98);self->downId.clear();self->down=-1;self->mediaDown=-1;self->extensionPressId.clear();
+                if(GetCapture()==window)ReleaseCapture();
+                self->HideBarTooltip();self->Send(hit,L"double");self->Draw();return 0;
+            }
+            [[fallthrough]];
+        }
         case WM_LBUTTONDOWN:
             if(!self->pointerDispatch){self->pointerKind=PT_MOUSE;self->pointerCancelled=false;}self->HideBarTooltip();if(self->dockDissolve.Active())self->Reveal();
             self->down = self->Hit(GET_X_LPARAM(l) * 96 / self->dpi, GET_Y_LPARAM(l) * 96 / self->dpi);
@@ -1557,7 +1617,7 @@ inline LRESULT NativeBar::HandleMessage(HWND window,UINT message,WPARAM w,LPARAM
             bool moved=std::hypot((GET_X_LPARAM(l)-pressPoint.x)*96/self->dpi,(GET_Y_LPARAM(l)-pressPoint.y)*96/self->dpi)>=5;
             JsonObject input;Put(input,L"kind",self->kind);input.Insert(L"pressed",JsonValue::CreateBooleanValue(self->down>=0));input.Insert(L"hit",JsonValue::CreateBooleanValue(hit>=0));input.Insert(L"moved",JsonValue::CreateBooleanValue(moved));self->app.Telemetry(L"shell-left-input",input);
             if (!moved&&hit == self->down){
-                if(hit>=0&&(Str(self->entries[hit],L"type")==L"Media"||Str(self->entries[hit],L"type")==L"Music")){int button=self->MediaButtonAt(hit,GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi);if(button>=0&&button==self->mediaDown)self->Send(hit,button==0?L"prev":button==1?L"play":L"next");else if(button<0&&self->mediaDown<0&&Str(self->entries[hit],L"type")==L"Media")self->Activate(hit);}
+                if(hit>=0&&(Str(self->entries[hit],L"type")==L"Media"||Str(self->entries[hit],L"type")==L"Music")){int button=self->MediaButtonAt(hit,GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi);if(button>=0&&button==self->mediaDown)self->Send(hit,button==0?L"prev":button==1?L"play":L"next");else if(button<0&&self->mediaDown<0)self->Activate(hit);}
                 else self->Activate(hit);
             }
             self->extensionPressId.clear();self->down=-1;self->mediaDown=-1;self->Draw();
@@ -1585,6 +1645,7 @@ inline LRESULT NativeBar::HandleMessage(HWND window,UINT message,WPARAM w,LPARAM
                 self->Key(static_cast<UINT>(w));
             return 0;
         case WM_TIMER:
+            if(w==NativeToolbarContrast::Timer){self->SampleToolbarContrast();return 0;}
             if(w==105){POINT point{};GetCursorPos(&point);bool keep=self->PointerKeepsOpen(point);self->WatchEdgePointer(point);if(!keep)self->ScheduleHide();return 0;}
             if(w==DockPreviewTimer){KillTimer(window,DockPreviewTimer);if(self->menuOpen){if(self->shell.PreviewHasCursor())SetTimer(window,DockPreviewTimer,200,nullptr);else self->shell.HidePreview(self);}return 0;}
             if(w==DockBodyTimer){KillTimer(window,DockBodyTimer);self->ResetDockBodyMotion();if(!self->edge)self->PositionBar(SWP_NOACTIVATE);return 0;}
@@ -1712,11 +1773,12 @@ inline LRESULT NativeBar::HandleMessage(HWND window,UINT message,WPARAM w,LPARAM
 inline NativeShell::NativeShell(App &app,bool observeWindows) : app(app)
 {
     if(!observeWindows)return;
+    captionClose=std::make_unique<NativeWindowClose::Controller>(app);
     clockWatch.Start(app.relay);
     regionalClockWatch.Start(app.relay,L"Control Panel\\International");
     InvalidateNativeClockSeconds();
     eventOwner=this;
-    for(auto event:{EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_MOVESIZESTART,EVENT_SYSTEM_MOVESIZEEND,EVENT_SYSTEM_MINIMIZESTART,EVENT_SYSTEM_MINIMIZEEND,EVENT_OBJECT_LOCATIONCHANGE}){
+    for(auto event:{EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_MOVESIZESTART,EVENT_SYSTEM_MOVESIZEEND,EVENT_SYSTEM_MINIMIZESTART,EVENT_SYSTEM_MINIMIZEEND,EVENT_OBJECT_LOCATIONCHANGE,EVENT_OBJECT_HIDE,EVENT_OBJECT_DESTROY,EVENT_OBJECT_SHOW}){
         auto hook=SetWinEventHook(event,event,nullptr,WindowEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);if(hook)windowHooks.push_back(hook);
     }
 }
@@ -1724,6 +1786,7 @@ inline NativeShell::~NativeShell()
 {
     TrayMenuAnchor().Reset();
     stopping = true;if(eventOwner==this)eventOwner=nullptr;
+    captionClose.reset();
     for(auto hook:windowHooks)UnhookWinEvent(hook);windowHooks.clear();
     if(app.relay)KillTimer(app.relay,76);
     preview.reset();

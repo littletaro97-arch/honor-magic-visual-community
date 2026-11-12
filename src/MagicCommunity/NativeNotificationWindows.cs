@@ -9,6 +9,9 @@ namespace MagicCommunity;
 // existing identified window merely failed to activate.
 internal sealed class NativeNotificationWindows
 {
+    internal static bool HasSource(JsonElement provider,string id,string appId) =>
+        id.Length is >0 and <=128 && appId.Length is >0 and <=512 &&
+        Array(provider,"notifications").Any(n=>Text(n,"id")==id&&Text(n,"appId")==appId);
     private readonly Dictionary<string,long> recent = new(StringComparer.Ordinal);
     private long sequence;
     private readonly object gate = new();
@@ -23,15 +26,52 @@ internal sealed class NativeNotificationWindows
         }
     }
     private static string PathKey(string path)=>path.Replace('/','\\').TrimEnd('\\').ToUpperInvariant();
+    internal static bool IsQq(string appId,IEnumerable<string> targets) =>
+        appId.Equals("QQ",StringComparison.OrdinalIgnoreCase)||appId.Equals("QQ.exe",StringComparison.OrdinalIgnoreCase)||
+        targets.Any(path=>System.IO.Path.IsPathFullyQualified(path)&&System.IO.Path.GetFileName(path).Equals("QQ.exe",StringComparison.OrdinalIgnoreCase));
+    internal static string[] ResidentPaths(IEnumerable<string> targets)=>targets.Where(p=>System.IO.Path.IsPathFullyQualified(p)&&System.IO.Path.GetExtension(p).Equals(".exe",StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    // Explorer and Windows brokers can own tray icons for unrelated features.
+    // Their executable identity alone cannot identify a resident application.
+    // Keep normal window activation and explicit clicks on those tray icons.
+    private static bool SharedResidentHost(string executable)
+    {
+        if(!System.IO.Path.IsPathFullyQualified(executable))return false;
+        string windows=Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if(windows.Length==0)return false;
+        try {
+            string path=PathKey(System.IO.Path.GetFullPath(executable));
+            if(path==PathKey(System.IO.Path.Combine(windows,"explorer.exe")))return true;
+            foreach(string folder in new[]{"System32","SysWOW64"})
+            foreach(string name in new[]{"rundll32.exe","dllhost.exe","svchost.exe","ApplicationFrameHost.exe","RuntimeBroker.exe"})
+                if(path==PathKey(System.IO.Path.Combine(windows,folder,name)))return true;
+        }
+        catch(ArgumentException){}
+        catch(NotSupportedException){}
+        return false;
+    }
+    internal static bool CanRestoreResident(string appId,IEnumerable<string> targets){
+        var paths=ResidentPaths(targets);
+        if(paths.Length>0)return paths.Any(path=>!SharedResidentHost(path));
+        return appId.Length is >0 and <=128&&appId.IndexOfAny(['!','\\','/',':','"','\0'])<0;
+    }
+    internal static bool ResidentDockLaunch(string target,JsonElement arguments)=>
+        !SharedResidentHost(target)&&(target.Length==0||System.IO.Path.GetExtension(target).Equals(".exe",StringComparison.OrdinalIgnoreCase)||System.IO.Path.GetExtension(target).Equals(".lnk",StringComparison.OrdinalIgnoreCase))&&
+        (arguments.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null||arguments.ValueKind==JsonValueKind.String&&string.IsNullOrWhiteSpace(arguments.GetString())||arguments.ValueKind==JsonValueKind.Array&&arguments.GetArrayLength()==0);
+    internal static bool MatchesResident(string appId,IEnumerable<string> targets,string executable){
+        if(!System.IO.Path.IsPathFullyQualified(executable)||SharedResidentHost(executable))return false;
+        var paths=ResidentPaths(targets);
+        if(paths.Length>0)return paths.Any(p=>PathKey(p)==PathKey(executable));
+        return CanRestoreResident(appId,[])&&(appId.Equals(System.IO.Path.GetFileName(executable),StringComparison.OrdinalIgnoreCase)||appId.Equals(System.IO.Path.GetFileNameWithoutExtension(executable),StringComparison.OrdinalIgnoreCase));
+    }
     internal JsonElement Find(string appId,JsonElement snapshot,IEnumerable<string> executableTargets,Func<JsonElement,string>? windowAppId=null)
     {
         var targets=executableTargets.Where(p=>!string.IsNullOrWhiteSpace(p)).Select(PathKey).ToHashSet(StringComparer.Ordinal);
         bool Matches(JsonElement window)
         {
             string path=Text(window,"executable"),name=System.IO.Path.GetFileName(path);
-            return appId.Equals(Text(window,"aumid"),StringComparison.OrdinalIgnoreCase)||
-                path.Length>0&&(targets.Contains(PathKey(path))||appId.Equals(name,StringComparison.OrdinalIgnoreCase)||appId.Equals(System.IO.Path.GetFileNameWithoutExtension(name),StringComparison.OrdinalIgnoreCase))||
-                windowAppId is not null&&appId.Equals(windowAppId(window),StringComparison.OrdinalIgnoreCase);
+            return appId.Length>0&&appId.Equals(Text(window,"aumid"),StringComparison.OrdinalIgnoreCase)||
+                path.Length>0&&(targets.Contains(PathKey(path))||targets.Count==0&&appId.Length>0&&(appId.Equals(name,StringComparison.OrdinalIgnoreCase)||appId.Equals(System.IO.Path.GetFileNameWithoutExtension(name),StringComparison.OrdinalIgnoreCase)))||
+                appId.Length>0&&windowAppId is not null&&appId.Equals(windowAppId(window),StringComparison.OrdinalIgnoreCase);
         }
         Dictionary<string,long> order;lock(gate)order=new(recent,StringComparer.Ordinal);
         return Array(snapshot,"windows").Take(512).Where(Matches)
@@ -39,23 +79,54 @@ internal sealed class NativeNotificationWindows
             .ThenBy(w=>Flag(w,"minimized")).ThenBy(w=>Text(w,"id"),StringComparer.Ordinal).FirstOrDefault();
     }
     internal static string? QqTrayIcon(JsonElement tray,IEnumerable<string> executableTargets)
+        => ResidentTrayIcon("QQ",tray,executableTargets);
+    internal static string? ResidentTrayIcon(string appId,JsonElement tray,IEnumerable<string> executableTargets)
     {
-        var paths=executableTargets.Where(p=>System.IO.Path.IsPathFullyQualified(p)&&
-            System.IO.Path.GetFileName(p).Equals("QQ.exe",StringComparison.OrdinalIgnoreCase)).Select(PathKey).ToHashSet(StringComparer.Ordinal);
-        var ids=Array(tray,"icons").Where(icon=>{
-            string exe=Text(icon,"executable");
-            return System.IO.Path.IsPathFullyQualified(exe)&&System.IO.Path.GetFileName(exe).Equals("QQ.exe",StringComparison.OrdinalIgnoreCase)&&
-                (paths.Count==0||paths.Contains(PathKey(exe)));
-        }).Select(icon=>Text(icon,"id")).Where(id=>id.Length>0).Distinct(StringComparer.Ordinal).Take(2).ToArray();
+        var ids=ResidentTrayIds(appId,tray,executableTargets);
         return ids.Length==1?ids[0]:null;
+    }
+    internal static string[] ResidentTrayIds(string appId,JsonElement tray,IEnumerable<string> executableTargets)
+    {
+        var paths=executableTargets.ToArray();
+        return Array(tray,"icons").Where(icon=>MatchesResident(appId,paths,Text(icon,"executable")))
+            .Select(icon=>Text(icon,"id")).Where(id=>id.Length>0).Distinct(StringComparer.Ordinal).Take(2).ToArray();
     }
     internal async Task Open(string appId,JsonElement snapshot,IEnumerable<string> executableTargets,Func<JsonElement,Task> activate,Action<string> launch,Func<JsonElement,string>? windowAppId=null,Func<Task<bool>>? activateResidentQq=null)
     {
-        if(appId.Length is <1 or >512||appId.Contains('"')||appId.Contains('\0'))throw new System.IO.InvalidDataException("Application identity differs.");
+        if(appId.Length>512||appId.Length==0&&!executableTargets.Any(System.IO.Path.IsPathFullyQualified)||appId.Contains('"')||appId.Contains('\0'))throw new System.IO.InvalidDataException("Application identity differs.");
         var target=Find(appId,snapshot,executableTargets,windowAppId);
         if(target.ValueKind==JsonValueKind.Object){await activate(target);return;}
-        if(appId.Equals("QQ",StringComparison.OrdinalIgnoreCase)&&activateResidentQq is not null&&await activateResidentQq())return;
+        if(CanRestoreResident(appId,executableTargets)&&activateResidentQq is not null&&await activateResidentQq())return;
         launch(appId);
+    }
+    // Bounded observation after a user action only. No background polling, no
+    // second launch, and never manufacture success from a posted tray callback.
+    internal async Task<JsonElement> WaitForWindow(string appId,IEnumerable<string> targets,
+        Func<Task<JsonElement>> snapshot,Func<int,Task> delay,Func<JsonElement,string>? windowAppId=null)
+    {
+        var paths=targets.ToArray();var timer=System.Diagnostics.Stopwatch.StartNew();
+        for(int attempt=0;attempt<8;attempt++){
+            if(attempt>0)await delay(150);
+            var remaining=TimeSpan.FromMilliseconds(1600)-timer.Elapsed;
+            if(remaining<=TimeSpan.Zero)break;
+            JsonElement current;
+            try {current=await snapshot().WaitAsync(remaining);}catch(TimeoutException){break;}
+            var target=Find(appId,current,paths,windowAppId);
+            if(target.ValueKind==JsonValueKind.Object)return target;
+        }
+        return default;
+    }
+    internal static async Task<JsonElement> RestoreTrayWindow(Func<string,Task<bool>> gesture,Func<Task<JsonElement>> observe)
+    {
+        // A single click and a double-click are distinct tray contracts. Give
+        // the ordinary handler time to expose its window before trying the
+        // double-click handler once. Never send it after a window was observed.
+        foreach(string action in new[]{"activate","double-click"}){
+            if(!await gesture(action))break;
+            var window=await observe();
+            if(window.ValueKind==JsonValueKind.Object)return window;
+        }
+        return default;
     }
     // Unpackaged apps can assign an AUMID to a window rather than to the process.
     // Query only on a notification click, never on the move/idle event path.

@@ -291,7 +291,7 @@ function renderFolder() {
 function render() {
   document.body.dataset.takeover=String(!!model.takeoverActive);
   cardHost.setActive(!!model.takeoverActive);
-  grid.replaceChildren(...board.rootIds.map(id=>{const value=shortcut(id);value.dataset.tile=itemKey(id);return value;}),...board.folders.filter(folder=>!model.hiddenFolders.includes(folder.id)).map(folderCard),...cardHost.sync(board.cards,model.cardDefinitions));
+  grid.replaceChildren(...board.rootIds.map(id=>{const value=shortcut(id);value.dataset.tile=itemKey(id);return value;}),...board.folders.filter(folder=>!model.hiddenFolders.includes(folder.id)).map(folderCard),...cardHost.sync(board.cards,model.cardDefinitions,model.honorServices));
   document.getElementById("screen").textContent = model.boardName; document.getElementById("version").textContent = model.version;
   const destination = document.getElementById("destination"), previous = destination.value; destination.replaceChildren(...board.folders.map(folder => { const option = node("option", null, folder.name); option.value = folder.id; return option; })); if (board.folders.some(folder => folder.id === previous)) destination.value = previous;
   const screens = document.getElementById("screen-target"), old = screens.value; screens.replaceChildren(...model.snapshot.boards.filter(row => row.active && row.id !== board.boardId).map(row => { const option = node("option", null, row.name); option.value = row.id; return option; })); if ([...screens.options].some(row => row.value === old)) screens.value = old;

@@ -15,8 +15,8 @@ AppVerName=Magic 视界社区版 {#ReleaseVersion}{#InstallerSuffix}
 AppPublisher=Magic 视界社区版
 AppPublisherURL=https://github.com/littletaro97-arch/honor-magic-visual-community
 DefaultDirName={autopf}\MagicCommunityDesktop
-DisableDirPage=yes
-UsePreviousAppDir=no
+DisableDirPage=auto
+UsePreviousAppDir=yes
 PrivilegesRequired=admin
 SetupArchitecture=x64
 ArchitecturesAllowed=x64compatible
@@ -49,6 +49,8 @@ Source: "Win32Install.Core.ps1"; Flags: dontcopy
 Source: "Win32Install.Core.ps1"; DestDir: "{app}\Setup"; Flags: ignoreversion
 Source: "Win32Install.Native.cs"; Flags: dontcopy
 Source: "Win32Install.Native.cs"; DestDir: "{app}\Setup"; Flags: ignoreversion
+Source: "Win32Install.Cleanup.ps1"; DestDir: "{app}\Setup"; Flags: ignoreversion
+Source: "Win32ProfileCleanup.cs"; DestDir: "{app}\Setup"; Flags: ignoreversion
 [Icons]
 Name: "{commonprograms}\Magic 视界社区版\{code:MainShortcut}"; Filename: "{app}\MagicNativeEntry.exe"; WorkingDir: "{app}"; IconFilename: "{app}\MagicNativeEntry.exe"; Check: NeedMainShortcut
 Name: "{commonprograms}\Magic 视界社区版\{code:ConfigShortcut}"; Filename: "{app}\MagicNativeEntry.exe"; Parameters: "--configure"; WorkingDir: "{app}"; IconFilename: "{app}\MagicNativeEntry.exe"; Check: NeedConfigShortcut
@@ -130,8 +132,6 @@ begin
   ExtractTemporaryFile('Win32Install.Native.cs');
   Gate := ExpandConstant('{tmp}\Win32Install.ps1');
   Result := '';
-  if CompareText(ExpandConstant('{app}'), ExpandConstant('{autopf}\MagicCommunityDesktop')) <> 0 then
-  begin Result := '安装目录必须使用受保护的默认位置。'; Exit; end;
   WizardForm.PreparingLabel.Caption := '正在请求社区版保存并正常退出，随后检查已有快捷方式…';
   if not PrepareAndCheck(Gate, UserMask) then
   begin Result := '正常退出或安装检查尚未完成，可重试本次安装；尚未替换文件。'; Exit; end;
@@ -146,8 +146,10 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var Code: Integer; Gate: String;
 begin
   Gate := ExpandConstant('{tmp}\Win32Install.ps1');
-  if CurStep = ssInstall then
+  if CurStep = ssInstall then begin
     if not PrepareAndCheck(Gate, Code) then RaiseException('仍有组件运行或安装检查未通过，未开始覆盖。');
+    if not RetryGate(Gate, 'PrepareDestination', False, Code) then RaiseException('安装目录尚未准备完成，未开始覆盖。');
+  end;
   if CurStep = ssPostInstall then begin
     if not RetryGate(Gate, 'Secure', False, Code) then RaiseException('安装文件权限未完成，不能启动。');
     if not RetryGate(Gate, 'SyncCommon', False, Code) then RaiseException('公共快捷方式尚未完成更新。');
@@ -156,14 +158,25 @@ begin
   end;
 end;
 function InitializeUninstall(): Boolean;
-var Code: Integer;
+var Code, Choice: Integer; Gate: String;
 begin
-  Result := MsgBox('卸载程序会先正常退出当前会话的社区版，保留各账户的布局、卡片和反馈数据。是否继续？', mbConfirmation, MB_YESNO) = IDYES;
-  if not Result then Exit;
+  Choice := IDYES;
+  if not UninstallSilent then
+    Choice := MsgBox('卸载时是否保留各 Windows 账户的布局、卡片和反馈数据？' + #13#10 + #13#10 +
+      '是：保留数据，重装继续沿用原位置。' + #13#10 +
+      '否：删除经核验的社区版数据及数据位置记录，无法撤销。桌面原文件和收纳原文件保留。' + #13#10 +
+      '取消：不卸载。', mbConfirmation, MB_YESNOCANCEL);
+  Result := Choice <> IDCANCEL; if not Result then Exit;
+  if Choice = IDNO then begin
+    Result := MsgBox('将删除各账户的社区版布局、卡片内容、反馈及数据位置记录。确定删除并卸载？', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+    if not Result then Exit;
+  end;
   Maintenance := NativeCreateMutex(0, False, 'Global\MagicCommunity.Desktop.Maintenance');
   if Maintenance = 0 then begin Result := False; Exit; end;
-  Result := RunGate(ExpandConstant('{app}\Setup\Win32Install.ps1'), 'PrepareUser', False, Code);
-  if Result then Result := RunGate(ExpandConstant('{app}\Setup\Win32Install.ps1'), 'Check', False, Code);
+  Gate := ExpandConstant('{app}\Setup\Win32Install.ps1');
+  Result := RunGate(Gate, 'PrepareUser', False, Code);
+  if Result then Result := RunGate(Gate, 'Check', False, Code);
+  if Result and (Choice = IDNO) then Result := RunGate(Gate, 'RemoveUserData', False, Code);
 end;
 procedure DeinitializeUninstall;
 begin ReleaseMaintenance; end;

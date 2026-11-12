@@ -152,6 +152,7 @@ JsonObject InputLayouts(HWND foreground)
     }
     JsonObject result;
     Flag(result, L"available", true);
+    Text(result, L"foregroundWindow", std::to_wstring(reinterpret_cast<uintptr_t>(foreground)));
     // Read-only IMM compatibility messages; failure leaves mode unknown.
     if (auto ime = ImmGetDefaultIMEWnd(foreground))
     {

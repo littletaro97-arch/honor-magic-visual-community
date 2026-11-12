@@ -21,6 +21,10 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
         if(Image!=Path&&System.IO.Path.GetExtension(Image).ToLowerInvariant() is ".png" or ".ico" or ".jpg" or ".jpeg" or ".bmp")
             if(Try("pack-image",()=>DesktopIcons.Read(new(){Target=Image},true,resizeImage:true)) is { } packed)return packed;
         if(!Application)return Try("tray-image",()=>DesktopIcons.Read(new(){Target=Image},true,resizeImage:true));
+        if(!string.IsNullOrWhiteSpace(Umid))
+            if(Try("application-id-hires",()=>ShellImage(@"shell:AppsFolder\"+Umid)) is { } packageLogo)return packageLogo;
+        if(System.IO.Path.IsPathFullyQualified(Path)&&!Path.StartsWith(@"\\",StringComparison.Ordinal)&&File.Exists(Path))
+            if(Try("shell-hires",()=>ShellImage(Path)) is { } highResolution)return highResolution;
         if(Window!=0&&IsWindow(new(Window))){
             if(Try("window",()=>WindowIcon(new(Window))) is { } icon)return icon;
             if(Try("process",()=>{
@@ -28,8 +32,6 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
                 string executable=process.MainModule?.FileName??"";return ExecutableIcon(executable);
             }) is { } module)return module;
         }
-        if(!string.IsNullOrWhiteSpace(Umid))
-            if(Try("application-id",()=>ShellImage(@"shell:AppsFolder\"+Umid)) is { } package)return package;
         if(Try("executable",()=>ExecutableIcon(Path)) is { } file)return file;
         if(System.IO.Path.GetExtension(Path).Equals(".lnk",StringComparison.OrdinalIgnoreCase)&&File.Exists(Path))
             if(Try("shortcut",()=>DesktopIcons.Read(new(){Target=Path},false)) is { } shortcut)return shortcut;
@@ -54,13 +56,13 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
         string path=System.IO.Path.GetFullPath(System.IO.Path.Combine(root,relative));
         if(!path.StartsWith(root,StringComparison.OrdinalIgnoreCase)||!System.IO.Path.GetExtension(path).Equals(".png",StringComparison.OrdinalIgnoreCase))return null;
         string stem=path[..^4];
-        foreach(string qualifier in new[]{".targetsize-128_altform-unplated",".targetsize-128",".targetsize-256_altform-unplated",".targetsize-256",".targetsize-48_altform-unplated",".targetsize-48",".scale-200",".scale-100",""}){
+        foreach(string qualifier in new[]{".targetsize-256_altform-unplated",".targetsize-256",".targetsize-128_altform-unplated",".targetsize-128",".targetsize-48_altform-unplated",".targetsize-48",".scale-200",".scale-100",""}){
             string candidate=stem+qualifier+".png";
             if(File.Exists(candidate)&&DesktopIcons.Read(new(){Target=candidate},true,resizeImage:true) is { } png)return png;
         }
         return null;
     }
-    private static string? ShellImage(string path)
+    internal static string? ShellImage(string path)
     {
         // Called only by the existing background STA. ICONONLY avoids content
         // thumbnails; the owned HBITMAP and RCW are released on every path.
@@ -83,9 +85,14 @@ internal sealed record ApplicationIconSource(string Identity,string Path,string 
         }else Marshal.ThrowExceptionForHR(SHCreateItemFromParsingName(path,IntPtr.Zero,ref iid,out factory));
         IntPtr bitmap=IntPtr.Zero;
         try{
-            Marshal.ThrowExceptionForHR(factory.GetImage(new Size(128,128),4,out bitmap));
-            string? png=NativeMenuBitmap.Encode(bitmap);
-            return png is not null&&png.Length<90000?png:null;
+            foreach(int edge in new[]{256,128}){
+                int hr=factory.GetImage(new Size(edge,edge),4|1,out bitmap);
+                try{
+                    // Preserve valid opaque package logos as well as alpha.
+                    if(hr>=0&&NativeMenuBitmap.Encode(bitmap,allowOpaque:true) is { } png)return png;
+                }finally{if(bitmap!=IntPtr.Zero)DeleteObject(bitmap);bitmap=IntPtr.Zero;}
+            }
+            return null;
         }
         finally{if(bitmap!=IntPtr.Zero)DeleteObject(bitmap);Marshal.FinalReleaseComObject(factory);}
     }

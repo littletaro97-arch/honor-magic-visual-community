@@ -55,6 +55,15 @@ public static class Program
                 string checkout=Path.GetFullPath(Argument(args,"--checkout")??throw new ArgumentException("Missing --checkout"));string artifacts=Path.Combine(checkout,"artifacts")+Path.DirectorySeparatorChar;
                 if(!File.Exists(Path.Combine(checkout,".git"))||!root.StartsWith(artifacts,StringComparison.OrdinalIgnoreCase)||!output.StartsWith(artifacts,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("外观导出仅接受工作树的隔离 artifacts 目录。");
                 Directory.CreateDirectory(output);var galleryApp=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};new NativeWpfTheme().ApplyInteractions(galleryApp.Resources);galleryApp.Resources.MergedDictionaries.Add(new ResourceDictionary{Source=new Uri("/MagicCommunity;component/ScrollbarStyles.xaml",UriKind.Relative)});var fixtureController=new AppController(root){PowerMode="平衡"};foreach(var board in fixtureController.State.Boards){board.Grid=new DesktopGrid{Columns=14,Rows=9};for(int i=0;i<26;i++)board.Grid.Placements["fixture:"+i]=new GridRect(i%14,i/14,1,1);}
+                if(args.Contains("--notification-position-states")){
+                    fixtureController.Screens.Clear();
+                    fixtureController.Screens.Add(new Display("fixture-main","主屏 · 2560 × 1440","fixture-main",0,0,2560,1400,true){PixelWidth=2560,PixelHeight=1440,Dpi=144});
+                    fixtureController.Screens.Add(new Display("fixture-secondary","副屏 · 1440 × 2560","fixture-secondary",2560,0,1440,2520,false){PixelWidth=1440,PixelHeight=2560,Dpi=192});
+                    foreach(bool dark in new[]{false,true})foreach(bool secondary in new[]{false,true})foreach(bool automatic in new[]{false,true}){
+                        var window=new CommunitySettingsWindow(fixtureController,dark);window.ExportNotificationState(Path.Combine(output,$"positions-{(secondary?"secondary":"main")}-{(automatic?"auto":"fixed")}-{(dark?"dark":"light")}.png"),secondary,automatic);window.Close();
+                    }
+                    return 0;
+                }
                 if(args.Contains("--icon-name-states")){
                     foreach(bool dark in new[]{false,true})foreach(bool changed in new[]{false,true}){
                         var preferences=new CommunityPreferences{CollapsedFolderIconNames=changed,DesktopIconNames=!changed};

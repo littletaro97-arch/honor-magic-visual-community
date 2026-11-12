@@ -7,6 +7,22 @@ namespace MagicCommunity;
 
 public static class NativeMenuBitmap
 {
+    // Keep the transport bound even for high-entropy icon packs. Retry from
+    // the original source, preserving aspect/alpha and never enlarging it.
+    internal static string? EncodeIcon(BitmapSource source)
+    {
+        int edge=Math.Max(source.PixelWidth,source.PixelHeight);
+        foreach(int limit in new[]{256,128,64})
+        {
+            double scale=Math.Min(1,limit/(double)edge);
+            BitmapSource image=scale<1?new TransformedBitmap(source,new ScaleTransform(scale,scale)):source;
+            var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));
+            using var stream=new MemoryStream();encoder.Save(stream);
+            if(stream.Length<=65536)return "data:image/png;base64,"+Convert.ToBase64String(stream.ToArray());
+            if(edge<=limit&&edge<=64)break;
+        }
+        return null;
+    }
     public static bool TestAlphaAndOwnership()
     {
         var info=new Header{Size=40,Width=3,Height=-1,Planes=1,Bits=32};
@@ -20,11 +36,13 @@ public static class NativeMenuBitmap
             var frame=BitmapDecoder.Create(stream,BitmapCreateOptions.PreservePixelFormat,BitmapCacheOption.OnLoad).Frames[0];
             var source=new FormatConvertedBitmap(frame,PixelFormats.Bgra32,null,0);byte[] bytes=new byte[12];source.CopyPixels(bytes,12,0);
             bool alphaPass=bytes[3]==0&&bytes[7]==255&&bytes[6]==255&&bytes[11]==128&&Math.Abs(bytes[10]-128)<=1;
-            Marshal.Copy(new byte[12],0,pixels,12);return alphaPass&&Encode(bitmap) is null&&GetObjectType(bitmap)==7&&Encode(new IntPtr(-1)) is null;
+            Marshal.Copy(new byte[]{0,0,255,255,0,0,255,255,0,0,255,255},0,pixels,12);
+            bool opaquePass=Encode(bitmap) is null&&Encode(bitmap,allowOpaque:true) is not null;
+            Marshal.Copy(new byte[12],0,pixels,12);return alphaPass&&opaquePass&&Encode(bitmap) is null&&GetObjectType(bitmap)==7&&Encode(new IntPtr(-1)) is null;
         }
         finally{DeleteObject(bitmap);}
     }
-    public static string? Encode(IntPtr bitmap)
+    public static string? Encode(IntPtr bitmap,bool allowOpaque=false)
     {
         // Shell owns this handle, including its alpha channel. HBitmap-to-WPF
         // convenience conversion can discard alpha and produce black squares.
@@ -40,8 +58,9 @@ public static class NativeMenuBitmap
             bool alpha=false,transparent=false;for(int i=3;i<pixels.Length;i+=4){if(pixels[i]!=0)alpha=true;if(pixels[i]<255)transparent=true;}
             // A legacy bitmap without alpha has no reliable transparency mask.
             // Do not manufacture an opaque black background; use the SVG fallback.
-            if(!alpha||!transparent)return null;
+            if(!alpha||!transparent&&!allowOpaque)return null;
             var source=BitmapSource.Create(size.Width,size.Height,96,96,PixelFormats.Pbgra32,null,pixels,size.Width*4);
+            if(allowOpaque)return EncodeIcon(source);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(source));using var stream=new MemoryStream();encoder.Save(stream);
             return "data:image/png;base64,"+Convert.ToBase64String(stream.ToArray());
         }

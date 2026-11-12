@@ -7,6 +7,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../../src/MagicCommunity/NativeTrayOrder.cs" Link="NativeTrayOrder.cs" />
+    <Compile Include="../../../src/MagicCommunity/NativeWeatherForecast.cs" Link="NativeWeatherForecast.cs" />
+    <Compile Include="../../../src/MagicCommunity/NotificationPlacementPreferences.cs" Link="NotificationPlacementPreferences.cs" />
+    <Compile Include="../../../src/MagicCommunity/PcManagerApplication.cs" Link="PcManagerApplication.cs" />
     <Compile Include="../../../src/MagicCommunity/NativeAppearanceSettings.cs" Link="NativeAppearanceSettings.cs" />
     <Compile Include="../../../src/MagicCommunity/NativePopupIds.cs" Link="NativePopupIds.cs" />
     <Compile Include="../../../src/MagicCommunity/NativeAcceptancePolicy.cs" Link="NativeAcceptancePolicy.cs" />
@@ -15,7 +19,11 @@
     <Compile Include="../../../src/MagicCommunity/NativeSystemClient.cs" Link="NativeSystemClient.cs" />
     <Compile Include="../../../src/MagicCommunity/NativeSystemPresentation.cs" Link="NativeSystemPresentation.cs" />
     <Compile Include="../../../src/MagicCommunity/NativeToolbarLyrics.cs" Link="NativeToolbarLyrics.cs" />
+    <Compile Include="../../../src/MagicCommunity/NativeMusicCardProjection.cs" Link="NativeMusicCardProjection.cs" />
+    <Compile Include="../../../src/MagicCommunity/ApplicationIconIdentity.cs" Link="ApplicationIconIdentity.cs" />
+    <Compile Include="../../../src/MagicCommunity/NativeToolbarMusic.cs" Link="NativeToolbarMusic.cs" />
     <Compile Include="../../../src/MagicCommunity/NativeSystemPresentationSession.cs" Link="NativeSystemPresentationSession.cs" />
+    <Compile Include="../../../src/MagicCommunity/NativeInputNotice.cs" Link="NativeInputNotice.cs" />
     <Compile Include="../../../src/MagicCommunity/NativeTaskbarLease.cs" Link="NativeTaskbarLease.cs" />
   <Compile Include="../../../src/MagicCommunity/NativeSystemPanel.cs" Link="NativeSystemPanel.cs" />
   <Compile Include="../../../src/MagicCommunity/NativeNotificationWindows.cs" Link="NativeNotificationWindows.cs" />

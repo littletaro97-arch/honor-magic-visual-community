@@ -34,6 +34,14 @@ public static class ShellDesktop
     [DllImport("shell32.dll")] private static extern int SHGetDesktopFolder(out IShellFolder folder);
     [DllImport("shell32.dll",CharSet=CharSet.Unicode)]private static extern int SHParseDisplayName(string name,IntPtr bind,out IntPtr pidl,uint mask,out uint attributes);
     [DllImport("shell32.dll")]private static extern int SHBindToParent(IntPtr pidl,ref Guid iid,out IShellFolder folder,out IntPtr child);
+    // The desktop namespace can supply its background menu even when Explorer's
+    // current IShellView is absent, restarting, or inaccessible in this session.
+    public static object BackgroundContext(Guid iid)
+    {
+        Marshal.ThrowExceptionForHR(SHGetDesktopFolder(out var folder));IntPtr result=IntPtr.Zero;
+        try{Marshal.ThrowExceptionForHR(folder.CreateViewObject(IntPtr.Zero,ref iid,out result));if(result==IntPtr.Zero)throw new InvalidOperationException("桌面 Shell 未提供背景菜单。");return Marshal.GetObjectForIUnknown(result);}
+        finally{if(result!=IntPtr.Zero)Marshal.Release(result);Marshal.ReleaseComObject(folder);}
+    }
     public static object ContextObject(string target,Guid iid,bool unowned=false)
     {
         Marshal.ThrowExceptionForHR(SHParseDisplayName(target,IntPtr.Zero,out var absolute,0,out _));IShellFolder? parent=null;IntPtr array=IntPtr.Zero,result=IntPtr.Zero;

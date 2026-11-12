@@ -8,10 +8,12 @@ static class PowerPanelChecks
     {
         void Check(string key,bool ok){checks[key]=ok;if(!ok)throw new InvalidOperationException(key);}
         var fixtures=new JsonArray();
-        NativeSystemPanel Build(string power){
+        NativeSystemPanel Build(string power,bool honor=true){
             using var config=JsonDocument.Parse("{}");using var snapshot=JsonDocument.Parse("{\"system\":{\"power\":"+power+"}}");
-            return NativeSystemPanel.Build("@magic/quick-settings",new(config.RootElement,snapshot.RootElement,new Dictionary<string,JsonElement>()),true);
+            return NativeSystemPanel.Build("@magic/quick-settings",new(config.RootElement,snapshot.RootElement,new Dictionary<string,JsonElement>()),true,honorServices:honor);
         }
+        var unsigned=Build("{\"batteryPercent\":62}",false);
+        Check("unsigned-honor-controls-absent",!unsigned.Commands.ContainsKey("honor-manager")&&!unsigned.Data["rows"]!.AsArray().Any(x=>x!["id"]!.GetValue<string>().StartsWith("honor-")));
         var full=Build("""{"batteryPercent":62,"acLineStatus":0,"powerSaver":1,"mode":"performance","batteries":[{"id":"0","name":"Battery A","healthPercent":84.28,"cycleCount":201},{"id":"1","name":"Battery B","healthPercent":null,"cycleCount":null}]}""");
         JsonObject Row(NativeSystemPanel panel,string id)=>panel.Data["rows"]!.AsArray().First(x=>x!["id"]!.GetValue<string>()==id)!.AsObject();
         Check("power-mode-shows-real-state",Row(full,"power-mode")["detail"]!.GetValue<string>()=="最佳性能");

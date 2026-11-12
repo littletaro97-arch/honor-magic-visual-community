@@ -13,6 +13,10 @@ public sealed partial class DesktopContextMenu : IDisposable
     public static Action<string>? Trace;
     public sealed record Entry(int Index,string Label,bool Submenu,bool Separator,bool Disabled,bool Checked,string? Key=null,string? Reason=null,string? Icon=null,string? Verb=null);
     private IContextMenu? context;
+    internal string QueryStage {get;private set;}="idle";
+    internal int BackgroundSource {get;private set;}=-1;
+    internal sealed record BackgroundFailure(int Source,string Phase,int Hresult,string ErrorType);
+    internal List<BackgroundFailure> BackgroundFailures {get;}=[];
     private ShellNewItemSite? newItemSite;
     public string? CreatedPath=>newItemSite?.CreatedPath;
     private const bool captureIcons=true;
@@ -35,6 +39,32 @@ public sealed partial class DesktopContextMenu : IDisposable
         ["new"]=["新建","New"],["display"]=["显示设置","Display settings"],["personalize"]=["个性化","Personalize"], ["paste"]=["粘贴","Paste"]};
     public object Open(string requestId,string? itemTarget=null,bool folderBackground=false,bool fullFileMenu=false,string[]? itemTargets=null,bool includeIcons=true,bool restrictHandlers=true)
     {
+        // A Shell view can bind successfully yet reject QueryContextMenu
+        // (including E_INVALIDARG). Retry the complete fresh lease, not just
+        // binding. Never reuse partially populated HMENUs/positional IDs.
+        bool desktop=itemTarget is null&&itemTargets is not {Length:>0};
+        BackgroundFailures.Clear();
+        try{
+            object Attempt(int source){
+                try{return OpenCore(requestId,itemTarget,folderBackground,fullFileMenu,itemTargets,includeIcons,restrictHandlers,source);}
+                catch(Exception error){if(desktop)BackgroundFailures.Add(new(source,QueryStage,error.HResult,error.GetType().Name));throw;}
+            }
+            return desktop?TryBackgroundSources(Attempt):Attempt(0);
+        }catch{Dismiss(requestId);throw;}
+    }
+    internal static object TryBackgroundSources(Func<int,object> attempt)
+    {
+        for(int source=0;;source++){
+            try{return attempt(source);}
+            catch(Exception error)when(source<2&&BackgroundUnavailable(error)){
+                Trace?.Invoke($"desktop-source-{source}-unavailable hr=0x{error.HResult:X8} type={error.GetType().Name}");
+            }
+        }
+    }
+    internal static bool BackgroundUnavailable(Exception error)=>error is COMException or UnauthorizedAccessException or InvalidOperationException or InvalidCastException or ArgumentException;
+    private object OpenCore(string requestId,string? itemTarget,bool folderBackground,bool fullFileMenu,string[]? itemTargets,bool includeIcons,bool restrictHandlers,int backgroundSource)
+    {
+        QueryStage="validate";BackgroundSource=itemTarget is null&&itemTargets is not {Length:>0}?backgroundSource:-1;
         ValidateId(requestId);
         if(cancelled.Contains(requestId))return new{requestId,cancelled=true,compact=Array.Empty<Entry>(),more=Array.Empty<Entry>()};
         if(folderBackground&&itemTargets is {Length:>0})throw new InvalidDataException();
@@ -43,15 +73,14 @@ public sealed partial class DesktopContextMenu : IDisposable
         try
         {
             var elapsed=System.Diagnostics.Stopwatch.StartNew();
+            QueryStage="bind";
             Trace?.Invoke("bind-start");
-            context=selection.Length>0?(IContextMenu)ShellDesktop.ContextObjects(selection,typeof(IContextMenu).GUID):itemTarget is null?NativeDesktop.WithView(view=>{
-                var iid=typeof(IContextMenu).GUID;
-                Marshal.ThrowExceptionForHR(((IShellView)view).GetItemObject(0,ref iid,out var menu));return (IContextMenu)menu;
-            }):ItemContext(itemTarget,folderBackground);
+            context=selection.Length>0?(IContextMenu)ShellDesktop.ContextObjects(selection,typeof(IContextMenu).GUID):itemTarget is null?DesktopBackground(backgroundSource):ItemContext(itemTarget,folderBackground);
             double bindMs=elapsed.Elapsed.TotalMilliseconds;
             Trace?.Invoke("bind-done");
             popup=CreatePopupMenu();if(popup==IntPtr.Zero)throw new Win32Exception();
             Trace?.Invoke("query-start");
+            QueryStage="query";
             bool archiveFile=selection.Any(value=>!Directory.Exists(value)&&
                 new[]{".zip",".7z",".rar",".gz",".bz2",".xz",".tar",".tgz",".iso",".cab"}.Contains(Path.GetExtension(value),StringComparer.OrdinalIgnoreCase));
             optimizedFile=!fullFileMenu&&(target is null||selection.All(value=>!value.StartsWith("::",StringComparison.Ordinal)));
@@ -71,34 +100,36 @@ public sealed partial class DesktopContextMenu : IDisposable
             // Full means all root handlers, not synchronous population of every
             // unopened cascade (CMF_SYNCCASCADEMENU). Resolve already forwards
             // WM_INITMENUPOPUP when a submenu is actually requested.
-            uint flags=target is null?0u:selection.Length==1?0x90u:0x10u;if(optimizedFile)flags|=0x800;
+            uint flags=target is null?0u:selection.Length==1?0x90u:0x10u;if(optimizedFile&&backgroundSource==0)flags|=0x800;
             using(var budget=new ShellExplorerCommands.QueryCallBudget(1500))
                 Marshal.ThrowExceptionForHR(context.QueryContextMenu(popup,0,1,0x6fff,flags));
             Trace?.Invoke("query-done");
             double queryMs=elapsed.Elapsed.TotalMilliseconds-bindMs;
+            QueryStage="read";
             var classic=Read(popup,captureIcons&&includeIcons,!optimizedFile);
             if(compactRestricted){
                 try{classic=classic.Concat(CompactWindowsCommands(selection,classic,includeIcons)).ToArray();}
-                catch(Exception error)when(error is COMException or NotImplementedException or InvalidCastException or InvalidOperationException){return Open(requestId,itemTarget,folderBackground,fullFileMenu,itemTargets,includeIcons,restrictHandlers:false);}
+                catch(Exception error)when(ShellExplorerCommands.ProviderUnavailable(error)||error is InvalidOperationException){Trace?.Invoke($"compact-supplements-unavailable hr=0x{error.HResult:X8}");}
             }
             // Stock compression/pinning may appear on the first page. Installed
             // modern providers are queried by the separate post-display lease.
+            QueryStage="modern";
             explorerCommands.Load(selection,classic,includePackaged:!optimizedFile);var more=classic.Concat(explorerCommands.Roots).ToArray();var compact=new List<Entry>();
             if(ShellAssociationMenu.Supports(selection)){
                 // Replace only the root Open With entry. Its children are read
                 // on demand and retain the same STA and request lease.
                 more=more.Where(row=>row.Key!="openas"&&!ShellOpenWith.IsChooser(row)).Append(new Entry(ShellAssociationMenu.RootIndex,"打开方式",true,false,false,false,Key:"openas")).ToArray();
             }
-            // A Windows version may not expose the stock path-copy command as
-            // IExplorerCommand. Fall back once to a fresh unrestricted binding.
-            if(compactRestricted&&!more.Any(row=>row.Key=="copyaspath"))return Open(requestId,itemTarget,folderBackground,fullFileMenu,itemTargets,includeIcons,restrictHandlers:false);
-            if(target is null){foreach(var pair in PrimaryNames){var row=more.FirstOrDefault(item=>!item.Separator&&pair.Value.Contains(Normalize(item.Label),StringComparer.OrdinalIgnoreCase));if(row is not null)compact.Add(row with{Key=pair.Key});}}
+            // Missing optional verbs do not invalidate the initialized first-page
+            // lease. Only an explicit/separate full-menu query loads all handlers.
+            if(target is null){foreach(var pair in PrimaryNames){var row=more.FirstOrDefault(item=>!item.Separator&&(string.Equals(item.Verb,pair.Key,StringComparison.OrdinalIgnoreCase)||pair.Value.Contains(Normalize(item.Label),StringComparer.OrdinalIgnoreCase)));if(row is not null)compact.Add(row with{Key=pair.Key});}}
             else foreach(string key in new[]{"open","runas","opennewwindow","openas","pintohome","pintostartscreen","compress","copyaspath","sharing","modernsharing","cut","copy","rename","delete","properties"}){var row=more.FirstOrDefault(item=>item.Key==key);if(row is not null)compact.Add(row);}
             if(!archiveFile)compact.AddRange(explorerCommands.Roots.Where(row=>row.Key=="modern"&&!compact.Any(old=>Normalize(old.Label)==Normalize(row.Label))));
             if(archiveFile&&!optimizedFile){compact.Clear();compact.AddRange(more);}
-            return new{requestId,cancelled=false,compact=compact.ToArray(),more,optimizedFile,compactRestricted,timings=new{bindMs,queryMs,readMs=elapsed.Elapsed.TotalMilliseconds-bindMs-queryMs,totalMs=elapsed.Elapsed.TotalMilliseconds},fullFileMenu=target is not null&&!optimizedFile,selectionCount=selection.Length,renameName=selection.Length!=1||target!.StartsWith("::",StringComparison.Ordinal)?null:Path.GetFileName(target)};
+            QueryStage="ready";
+            return new{requestId,cancelled=false,compact=compact.ToArray(),more,optimizedFile,compactRestricted,timings=new{bindMs,queryMs,readMs=elapsed.Elapsed.TotalMilliseconds-bindMs-queryMs,totalMs=elapsed.Elapsed.TotalMilliseconds,backgroundSource=BackgroundSource,backgroundFailures=BackgroundFailures.ToArray()},fullFileMenu=target is not null&&!optimizedFile,selectionCount=selection.Length,renameName=selection.Length!=1||target!.StartsWith("::",StringComparison.Ordinal)?null:Path.GetFileName(target)};
         }
-        catch{Dismiss(requestId);throw;}
+        catch{Dismiss();throw;}
     }
     public object Undo(string requestId)
     {
@@ -109,6 +140,18 @@ public sealed partial class DesktopContextMenu : IDisposable
             if(entry is null)throw new InvalidOperationException("Windows 当前没有可撤销的文件操作。");
             Invoke(requestId,[entry.Index]);return new{ok=true};
         }finally{Dismiss(requestId);}
+    }
+    private static IContextMenu DesktopBackground(int source)
+    {
+        if(source==0){
+            return NativeDesktop.WithView(view=>{
+                var iid=typeof(IContextMenu).GUID;
+                Marshal.ThrowExceptionForHR(((IShellView)view).GetItemObject(0,ref iid,out var menu));
+                return (IContextMenu)menu;
+            });
+        }
+        if(source==1)return (IContextMenu)ShellDesktop.BackgroundContext(typeof(IContextMenu).GUID);
+        return ItemContext(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),true);
     }
     private static IContextMenu ItemContext(string target,bool background)
     {
@@ -124,6 +167,7 @@ public sealed partial class DesktopContextMenu : IDisposable
     }
     public Entry[] Children(string requestId,int[] path)
     {
+        QueryStage="children";
         ValidateId(requestId);if(active!=requestId)throw new InvalidDataException("Menu expired.");
         if(path.Length>0&&path[0]==ShellAssociationMenu.RootIndex){if(path.Length!=1)throw new InvalidDataException();return associations.Children(targets);}
         if(path.Length>0&&supplemental.ContainsKey(path[0]))throw new InvalidDataException("This command has no submenu.");
@@ -201,7 +245,7 @@ public sealed partial class DesktopContextMenu : IDisposable
         try
         {
             if(row.Key=="empty-bin"){RecycleBinWatch.EmptyWithConfirmation();return;}
-            if(targets.Length>1&&row.Verb=="properties"){ShellProperties.Show(targets);return;}
+            if(InvokeSelectedFileCommand(row))return;
             if(targets.Length==1&&ShellOpenWith.IsChooser(row)){ShellOpenWith.Show(targets);return;}
             if(targets.Length==1&&Path.GetExtension(targets[0]).Equals(".zip",StringComparison.OrdinalIgnoreCase)&&row.Verb=="extract"){
                 // The Windows ZIP wizard is hosted by this transient STA and
@@ -224,6 +268,28 @@ public sealed partial class DesktopContextMenu : IDisposable
             }
         }
         finally{Dismiss(requestId);}
+    }
+    private bool InvokeSelectedFileCommand(Entry row)
+    {
+        if(targets.Length==0)return false;
+        if(row.Verb=="properties"&&(targets.Length>1||Path.IsPathFullyQualified(targets[0]))){
+            ShellProperties.Show(targets);
+            return true;
+        }
+        if(row.Verb=="copyaspath"&&targets.All(Path.IsPathFullyQualified)){
+            // The Shell offered and enabled this verb for this exact selection.
+            // Publish its quoted paths as persistent Unicode text in one operation.
+            string text=string.Join("\r\n",targets.Select(path=>"\""+path+"\""));
+            // Eager native data remains owned by Windows after this worker
+            // exits. WPF's additional OLE flush can fail after publishing text,
+            // which reports failure even though another app can already paste.
+            IntPtr owner=CreateWindowEx(0x80,"STATIC","Magic path clipboard",unchecked((int)0x80000000),0,0,1,1,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+            if(owner==IntPtr.Zero)throw new Win32Exception();
+            try{NativeHandoffClipboard.Put(owner,new(text,"",[]),onlyText:true);}
+            finally{DestroyWindow(owner);}
+            return true;
+        }
+        return false;
     }
     private IntPtr Resolve(string requestId,int[] path,bool invoking=false)
     {
@@ -260,6 +326,7 @@ public sealed partial class DesktopContextMenu : IDisposable
         if(source is null&&verbs.TryGetValue(id,out var cached))return cached;
         IntPtr buffer=Marshal.AllocHGlobal(2048);
         try{Marshal.WriteInt16(buffer,0);var value=(source??context).GetCommandString(new UIntPtr(id-1),4,IntPtr.Zero,buffer,1024)>=0?Marshal.PtrToStringUni(buffer):null;if(source is null)verbs[id]=value;return value;}
+        catch(COMException error){Trace?.Invoke($"verb-unavailable id={id} hr=0x{error.HResult:X8}");if(source is null)verbs[id]=null;return null;}
         finally{Marshal.FreeHGlobal(buffer);}
     }
     private bool IsRecycleRoot=>targets.Length==1&&ShellClipboardCommands.IsRecycleDestination(targets[0]);
@@ -290,7 +357,10 @@ public sealed partial class DesktopContextMenu : IDisposable
                 key="empty-bin";
                 if(RecycleBinWatch.QueryFull() is bool full)shellDisabled=!full;
             }
-            rows.Add(new(index,unknown?"未提供文字的系统扩展":label,GetSubMenu(menu,index)!=IntPtr.Zero,separator,shellDisabled||unknown||layerToggle||unsupportedGrid||virtualRename||multipleRename,(state&8)!=0,Key:key,Reason:reason,Icon:icons&&!separator?ShellMenuIcons.Stock(key)??NativeMenuBitmap.Encode(info.Bitmap)??(fallbackIcons?menuIcons.Get(targets.Length>1?null:target,verb,label):null):null,Verb:verb));
+            string? icon=null;
+            if(icons&&!separator)try{icon=ShellMenuIcons.Stock(key)??NativeMenuBitmap.Encode(info.Bitmap)??(fallbackIcons?menuIcons.Get(targets.Length>1?null:target,verb,label):null);}
+            catch(Exception error)when(error is COMException or ArgumentException or IOException or InvalidOperationException){Trace?.Invoke($"icon-unavailable index={index} hr=0x{error.HResult:X8}");}
+            rows.Add(new(index,unknown?"未提供文字的系统扩展":label,GetSubMenu(menu,index)!=IntPtr.Zero,separator,shellDisabled||unknown||layerToggle||unsupportedGrid||virtualRename||multipleRename,(state&8)!=0,Key:key,Reason:reason,Icon:icon,Verb:verb));
             Trace?.Invoke("read-"+index+"-done");
         }
         return rows.ToArray();
@@ -312,7 +382,7 @@ public sealed partial class DesktopContextMenu : IDisposable
     public static object Inspect(string? target=null)
     {
         using var menu=new DesktopContextMenu();string id=Guid.NewGuid().ToString("N");var root=menu.Open(id,target);var rows=menu.Read(menu.popup);
-        return new{source=target is null?"Explorer IShellView SVGIO_BACKGROUND":"IShellItem BHID_SFUIObject",presentation="Existing WebView: compact / more",root,
+        return new{source=target is not null?"IShellItem BHID_SFUIObject":menu.BackgroundSource switch{0=>"Explorer IShellView SVGIO_BACKGROUND",1=>"Desktop namespace CreateViewObject",_=>"Desktop directory BHID_SFViewObject"},presentation="Shell query only; no menu window",root,
             submenus=rows.Where(row=>row.Submenu&&row.Key is "view" or "new").Select(row=>new{row.Key,items=menu.Children(id,[row.Index])}).ToArray(),commandsInvoked=false};
     }
     public void Dispose()=>Dismiss();

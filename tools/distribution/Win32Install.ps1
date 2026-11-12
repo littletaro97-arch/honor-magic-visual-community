@@ -1,4 +1,4 @@
-﻿param([ValidateSet('Check','Secure','PrepareUser','ScanCommon','SyncUser','SyncCommon')][string]$Mode='Check',[string]$Version,[string]$ExpectedInstallRoot)
+﻿param([ValidateSet('Check','PrepareDestination','Secure','PrepareUser','ScanCommon','SyncUser','SyncCommon','RemoveUserData')][string]$Mode='Check',[string]$Version,[string]$ExpectedInstallRoot)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Win32Install.Core.ps1')
 try {
@@ -11,38 +11,47 @@ try {
     if($Mode -eq 'ScanCommon'){exit (64 + (Get-MagicShortcutMask @(Get-MagicOwnedShortcuts (Get-MagicShortcutFolders -Common))))}
     if($Mode -eq 'SyncUser'){Sync-MagicOwnedShortcuts (Get-MagicShortcutFolders);exit 0}
     if($Mode -eq 'SyncCommon'){Sync-MagicOwnedShortcuts (Get-MagicShortcutFolders -Common) -Common;exit 0}
-    # ExpectedInstallRoot is only compared with the protected machine directory;
-    # it never selects a caller-supplied target for file or ACL changes.
+    if($Mode -eq 'RemoveUserData'){
+        Assert-MagicInstalledStopped
+        . (Join-Path $PSScriptRoot 'Win32Install.Cleanup.ps1')
+        Remove-MagicAccountData @(Get-MagicAccountProfiles) $target | Out-Null
+        exit 0
+    }
+    # Existing installations retain their registered path. A fresh target must
+    # be dedicated and below protected ancestors, before any ACL change.
+    Assert-MagicInstallAncestors $target
     for($ancestor=$target;$ancestor;$ancestor=[IO.Path]::GetDirectoryName($ancestor)){
         if((Test-Path -LiteralPath $ancestor) -and ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw '安装路径含链接，请先修复安装目录。'}
     }
-    if($Mode -eq 'Check'){
+    if($Mode -in @('Check','PrepareDestination')){
         Assert-MagicInstalledStopped
         if(Test-Path -LiteralPath $target){
-            $items=@((Get-Item -LiteralPath $target)) + @(Get-ChildItem -LiteralPath $target -Force -Recurse)
+            if(-not (Get-MagicRegisteredRoot) -and @(Get-ChildItem -LiteralPath $target -Force).Count){throw '首次安装请选择专用空目录，不能覆盖已有文件。'}
+            $items=@(Get-MagicInstallTree $target)
             $privileged=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
             foreach($item in $items){
                 if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw '现有安装中含链接，未覆盖。'}
                 $acl=Get-Acl -LiteralPath $item.FullName
                 if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $privileged){throw '现有安装目录所有者异常，请先检查并移走该目录，未覆盖。'}
                 foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
-                    if($rule.AccessControlType -eq 'Allow' -and -not($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and ([long]$rule.FileSystemRights -band (0x50000000 -bor [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership)) -and $rule.IdentityReference.Value -notin $privileged){throw '现有安装允许普通用户改写，请先修复目录权限，未覆盖。'}
+                    if(Test-MagicUnsafeWrite $rule){throw '现有安装允许普通用户改写，请先修复目录权限，未覆盖。'}
                 }
             }
             $current=Join-Path $target 'MagicCommunity.exe'
             if($Version -and (Test-Path -LiteralPath $current) -and [version]([version](Get-Item -LiteralPath $current).VersionInfo.FileVersion).ToString(3) -gt [version]$Version){throw '已安装版本较新，不能用此安装包降级。'}
         }
         Assert-MagicInstalledFilesFree
+        if($Mode -eq 'PrepareDestination' -and -not (Test-Path -LiteralPath $target)){
+            # Windows PowerShell creates with the final ACL before file copies.
+            [void][IO.Directory]::CreateDirectory($target,(New-MagicInstallAcl))
+        }
     }else{
         $admin=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-        $acl=[Security.AccessControl.DirectorySecurity]::new()
-        $acl.SetAccessRuleProtection($true,$false);$acl.SetOwner($admin)
-        foreach($spec in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@('S-1-5-32-545','ReadAndExecute'))){
-            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($spec[0]),$spec[1],'ContainerInherit,ObjectInherit','None','Allow'))
-        }
+        $items=@(Get-MagicInstallTree $target)
+        $acl=New-MagicInstallAcl
         Set-Acl -LiteralPath $target -AclObject $acl
         # Directory inheritance is reset in parent-before-child order, with no links.
-        foreach($item in Get-ChildItem -LiteralPath $target -Force -Recurse | Sort-Object {$_.FullName.Length}){
+        foreach($item in $items | Where-Object {$_.FullName -ine $target} | Sort-Object {$_.FullName.Length}){
             if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw '安装内含链接，权限处理已停止。'}
             $security=Get-Acl -LiteralPath $item.FullName
             $security.SetOwner($admin)

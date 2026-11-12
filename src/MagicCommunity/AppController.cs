@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace MagicCommunity;
 public sealed class AppController
 {
-    public const string Version = "0.4.9";
+    public const string Version = "0.5.1";
     public bool DesktopActive { get; set; }
     public string PowerMode { get; internal set; }="暂不可用";
     public string Root { get; }
@@ -36,17 +36,18 @@ public sealed class AppController
     {
         if(Collections.IsBusy||!DesktopSessionState.CanRefresh())return;
         var screens=Displays.Read();
-        if(screens.Count==0||screens.Any(s=>s.Id.StartsWith("temporary:",StringComparison.Ordinal)))return;
-        Screens = screens;
+        if (!Displays.CanReconcile(screens)) return;
         var next = StateStore.Copy(State);
-        var notices = Store.ReadOnly ? new List<string>() : DesktopDisplayRecovery.Reconcile(next, Screens);
-        foreach (var display in Screens)
+        var notices = Store.ReadOnly ? new List<string>() : DesktopDisplayRecovery.Reconcile(next, screens);
+        foreach (var display in screens)
             if (!next.Boards.Any(x => x.Id == display.Id)) next.Boards.Add(new() { Id = display.Id, Name = display.Label });
         if (JsonSerializer.Serialize(next, StateStore.Json) != JsonSerializer.Serialize(State, StateStore.Json))
         {
             if (!Store.ReadOnly){next.Revision=State.Revision+1;Store.Save(next);}
             State = next;
         }
+        // Publish the topology only after its layout transaction succeeded.
+        Screens = screens;
         if(notices.Count>0){Status=string.Join(" ",notices);Log("desktop_display_recovery",new{revision=State.Revision,notices,boards=State.Boards.Select(b=>new{b.Id,pages=b.Pages?.Count??1,active=b.ActivePageId,placements=DesktopPages.Grids(b).Sum(g=>g.Placements.Count),cards=DesktopCards.Items(b).Count(),customGrid=b.IconGrid is not null})});}
         Changed?.Invoke();
     }

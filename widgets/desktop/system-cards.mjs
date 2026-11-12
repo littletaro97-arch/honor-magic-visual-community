@@ -86,7 +86,7 @@ export function renderSystemCard(root,context){
    node('div','system-storage-title',label,body);const value=node('div','system-storage-value','—',body),ring=node('div','system-storage-ring',undefined,group);
    const icon=svg(ring,[['circle',{cx:17,cy:17,r:14,fill:'none',stroke:'currentColor','stroke-opacity':.2,'stroke-width':2.6}],['circle',{cx:17,cy:17,r:14,fill:'none',stroke:'currentColor','stroke-width':2.6,'stroke-linecap':'round','stroke-dasharray':87.9646,'stroke-dashoffset':87.9646}]],'system-ring-svg','0 0 34 34');
    const percent=node('span','system-storage-percent','—',ring),arc=icon.lastChild;
-   if(label==='磁盘'){
+   if(label==='磁盘'&&context.honorServices===true){
     const clean=node('button','system-storage-cleanup','打开管家清理',body);clean.type='button';clean.disabled=preview;clean.title='打开电脑管家清理页并扫描，实际清理由你在管家中确认';
     clean.addEventListener('click',async()=>{clean.disabled=true;try{await context.openStorageCleanup();}catch{}finally{if(!context.signal?.aborted)clean.disabled=false;}});
    }

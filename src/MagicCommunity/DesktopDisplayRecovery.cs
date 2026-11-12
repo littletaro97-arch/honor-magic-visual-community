@@ -32,6 +32,11 @@ internal static class DesktopDisplayRecovery
         keys.AddRange(board.Unplaced.Keys); keys.AddRange(expected.Keys);
         return keys.Where(expected.ContainsKey).Distinct(StringComparer.Ordinal).ToArray();
     }
+    private static bool IsUnidentifiedEmptyBoard(Board board, DesktopDisplayRecord memory) =>
+        memory.Hardware.Length == 0 && !memory.Reordered && memory.Order.Count == 0 && board.Name == memory.Label &&
+        DesktopGridActions.Expected(board).Count == 0 && board.Unplaced.Count == 0 &&
+        !board.Paged && board.Pages is not { Count: > 1 } && board.IconGrid is null && board.SortSettings is null &&
+        DesktopPages.Grids(board).All(g => g.Placements.Count == 0);
     internal static void Validate(LayoutState state)
     {
         if (state.Displays is null) return;
@@ -50,16 +55,32 @@ internal static class DesktopDisplayRecovery
         state.SchemaVersion = Math.Max(8, state.SchemaVersion);
         foreach (var board in state.Boards)
             if (!memories.Any(m => m.Id == board.Id)) memories.Add(new() { Id = board.Id, Label = board.Name, Primary = board.Name.StartsWith("主屏", StringComparison.Ordinal) });
+        // Windows device interface paths are case-insensitive; their casing is
+        // not a disconnect or a new physical display.
+        foreach (var screen in screens.Where(s => !state.Boards.Any(b => b.Id == s.Id)))
+        {
+            var matches = state.Boards.Where(b => string.Equals(b.Id, screen.Id, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matches.Length != 1) continue;
+            memories.Single(m => m.Id == matches[0].Id).Id = screen.Id;
+            matches[0].Id = screen.Id;
+        }
         foreach (var m in memories.Where(m => !screens.Any(s => s.Id == m.Id)))
         {
             if (m.DisconnectedAt is null) { m.DisconnectedAt = DateTimeOffset.UtcNow; m.Order = Order(state.Boards.Single(b => b.Id == m.Id), m).ToList(); }
         }
         var newcomers = screens.Where(s => !state.Boards.Any(b => b.Id == s.Id)).ToList();
         // A stable, serialized EDID identity may survive a connector/device-ID change.
-        foreach (var screen in newcomers.ToArray())
+        foreach (var screen in screens)
         {
+            var placeholder = state.Boards.SingleOrDefault(b => b.Id == screen.Id);
+            var placeholderMemory = placeholder is null ? null : memories.Single(m => m.Id == placeholder.Id);
+            // The interface may arrive before EDID. Once hardware becomes known,
+            // rejoin its unique saved board only if the temporary active layout
+            // is still empty and unmodified. Never merge over user edits.
+            if (placeholder is not null && !IsUnidentifiedEmptyBoard(placeholder, placeholderMemory!)) continue;
             var matches = memories.Where(m => m.DisconnectedAt is not null && screen.HardwareIdentity.Length > 0 && m.Hardware == screen.HardwareIdentity).ToArray();
             if (matches.Length != 1 || screens.Count(s => s.HardwareIdentity == screen.HardwareIdentity) != 1) continue;
+            if (placeholder is not null) { state.Boards.Remove(placeholder); memories.Remove(placeholderMemory!); }
             var m = matches[0]; state.Boards.Single(b => b.Id == m.Id).Id = screen.Id; m.Id = screen.Id; newcomers.Remove(screen);
         }
         var missing = Offline(state, screens).Where(b => !memories.Single(m => m.Id == b.Id).Primary).ToArray();
@@ -68,6 +89,9 @@ internal static class DesktopDisplayRecovery
         if (missing.Length == 1 && newSecondary.Length == 1)
         {
             var board = missing[0]; var m = memories.Single(d => d.Id == board.Id); board.Id = newSecondary[0].Id; m.Id = board.Id;
+            // This is a replacement, not an exact identity match. Never carry
+            // the previous monitor's hardware identity into an unknown one.
+            m.Hardware = newSecondary[0].HardwareIdentity;
             m.Reordered = true; newcomers.Remove(newSecondary[0]);
         }
         foreach (var screen in newcomers)
@@ -80,19 +104,27 @@ internal static class DesktopDisplayRecovery
             var m = memories.Single(d => d.Id == screen.Id); var board = state.Boards.Single(b => b.Id == screen.Id);
             var size = DesktopGridLayout.Physical(screen);
             // Some docks reuse their connector ID without an intermediate empty topology.
-            if(m.Width>0&&m.Hardware.Length>0&&screen.HardwareIdentity.Length>0&&m.Hardware!=screen.HardwareIdentity)m.DisconnectedAt??=DateTimeOffset.UtcNow;
+            bool hardwareChanged = m.Hardware.Length > 0 && screen.HardwareIdentity.Length > 0 && m.Hardware != screen.HardwareIdentity;
+            if (m.Width > 0 && hardwareChanged) m.DisconnectedAt ??= DateTimeOffset.UtcNow;
             if (m.DisconnectedAt is not null)
             {
                 // A resume can report a temporary DPI/resolution even for the
                 // same monitor. Geometry is projected separately and must not
                 // destroy page IDs, card anchors or custom grid settings.
-                bool same = !m.Reordered && ((m.Primary&&screen.Primary) ||
-                    (m.Hardware.Length>0&&m.Hardware==screen.HardwareIdentity&&screens.Count(s=>s.HardwareIdentity==m.Hardware)==1));
+                // Missing EDID during resume is unknown, not evidence of a
+                // replacement. The interface ID still matches this board;
+                // primary/secondary roles and DISPLAY1/2 names are not identity.
+                bool same = !m.Reordered && !hardwareChanged &&
+                    (screen.HardwareIdentity.Length == 0 || m.Hardware.Length == 0 ||
+                     screens.Count(s => s.HardwareIdentity == m.Hardware) == 1);
                 if (!same) Pack(board, screen, Order(board, m));
                 notices.Add(same ? (screen.Primary?"主屏内容已保留原页面和位置。":"副屏内容已按原布局恢复。") : "副屏身份或顺序已变化，内容已按默认顺序重排。");
                 m.DisconnectedAt = null; m.Reordered = false;
             }
-            m.Hardware = screen.HardwareIdentity; m.Width = size.Width; m.Height = size.Height; m.Dpi = screen.Dpi; m.Primary = screen.Primary; m.Label = screen.Label;
+            // Keep the last verified identity across temporary registry/driver
+            // gaps, including a persisted state followed by an application restart.
+            if (screen.HardwareIdentity.Length > 0) m.Hardware = screen.HardwareIdentity;
+            m.Width = size.Width; m.Height = size.Height; m.Dpi = screen.Dpi; m.Primary = screen.Primary; m.Label = screen.Label;
             m.Order = Order(board, m).ToList();
         }
         return notices;

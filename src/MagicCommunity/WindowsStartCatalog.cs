@@ -8,7 +8,7 @@ using System.Text.Json;
 namespace MagicCommunity;
 
 internal sealed record StartApplication(string Id, string Name, string Target, string Aumid,
-    string? TileArguments = null, bool Available = true);
+    string? TileArguments = null, bool Available = true, string Location = "");
 
 internal sealed record WindowsStartCatalog(StartApplication[] All, StartApplication[] SearchOnly,
     StartApplication[]? Pins, string? PinReadError)
@@ -139,12 +139,15 @@ internal sealed record WindowsStartCatalog(StartApplication[] All, StartApplicat
                     if (aumid.Length == 0 && !local && NativeJumpLists.ValidId(path) && !path.StartsWith("::")) aumid = path;
                     string key = aumid.Length == 0 ? path : aumid;
                     if (key.Length == 0 || name.Length is 0 or > 512) continue;
-                    var app = new StartApplication(Id(key), name, local ? path : "", aumid);
+                    string target = Property(item, "System.Link.TargetParsingPath");
+                    // AppsFolder paths are frequently AUMIDs, including ordinary
+                    // desktop apps. Keep their launch identity separate from the
+                    // registered local file used by Open file location.
+                    string location = local ? path : Local(target) ? target : "";
+                    var app = new StartApplication(Id(key), name, local ? path : "", aumid, Location: location);
                     byId.TryAdd(key, app);
                     app = byId[key];
                     if (local) paths[path] = app;
-                    if (!local) continue;
-                    string target = Property(item, "System.Link.TargetParsingPath");
                     if (target.Length == 0 && local && !path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)) target = path;
                     if (Local(target))
                     {
@@ -160,10 +163,10 @@ internal sealed record WindowsStartCatalog(StartApplication[] All, StartApplicat
             {
                 if (paths.TryGetValue(path, out var exact)) return exact;
                 var link = ReadLink(shell, path);
-                if (byId.TryGetValue(link.Id, out var known)) return paths[path] = known;
+                if (byId.TryGetValue(link.Id, out var known)) return paths[path] = known with { Location = path };
                 if (Local(link.Target) && launches.TryGetValue((link.Target.ToUpperInvariant(), link.Arguments), out var match) && match is not null)
-                    return paths[path] = match;
-                var fallback = new StartApplication(Id(path), Path.GetFileNameWithoutExtension(path), path, link.Id, Available: File.Exists(path));
+                    return paths[path] = match with { Location = path };
+                var fallback = new StartApplication(Id(path), Path.GetFileNameWithoutExtension(path), path, link.Id, Available: File.Exists(path), Location: path);
                 paths[path] = fallback;
                 if (Local(link.Target)) launches.TryAdd((link.Target.ToUpperInvariant(), link.Arguments), fallback);
                 return fallback;

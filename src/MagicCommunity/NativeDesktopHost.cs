@@ -38,7 +38,7 @@ public static class NativeDesktopHost
         SetWindowLongPtr(hwnd,-16,new IntPtr((style&~0x40cf0000L)|0x80000000L));
         // A desktop click must deactivate Shell flyouts (Win+A/Win+N). Keeping
         // WS_EX_NOACTIVATE here prevents that normal mouse activation. The host
-        // restores desktop depth on focus; attaching/showing still never activates.
+        // guard manages desktop depth on foreground events; attaching/showing never activates.
         SetWindowLongPtr(hwnd,-20,new IntPtr((extended&~0x08040108L)|0x00000080L));
         SetWindowLongPtr(hwnd,-8,owner);
         if(GetParent(hwnd)!=owner)throw new Win32Exception(Marshal.GetLastWin32Error(),"挂接原生桌面所有者失败。");
@@ -62,14 +62,6 @@ public static class NativeDesktopHost
         NativeRegion.Verify(value,root);
         var foreground=GetForegroundWindow();
         return foreground!=IntPtr.Zero&&GetAncestor(foreground,2)==new IntPtr(value);
-    }
-    public static bool ConfirmKeyboardAtDesktopDepth(long value,string root)
-    {
-        if(!IsKeyboardForeground(value,root))return false;
-        // Explicit activation may raise a tool window. Keep the focused desktop
-        // at its original depth so ordinary application windows stay above it.
-        if(!SetWindowPos(new(value),new IntPtr(1),0,0,0,0,0x1|0x2|0x10))throw new Win32Exception();
-        return IsKeyboardForeground(value,root);
     }
     [StructLayout(LayoutKind.Sequential)]private struct Margins{public int Left,Right,Top,Bottom;}
     [StructLayout(LayoutKind.Sequential)]private struct WindowRect{public int Left,Top,Right,Bottom;}

@@ -9,6 +9,18 @@ public static class GridSelfTests
         var item=new DesktopItem{Name="Grid app",Target=Path.Combine(folder,"grid-app.lnk")};
         LayoutState Fixture()=>new(){Boards=[new(){Id="one",Boxes=[new(){Id="folder",Name="Folder",Items=[item]}],RootItems=[new(){Name="Other",Target=Path.Combine(folder,"other.txt")}],Grid=new(){Columns=10,Rows=12}},new(){Id="two",Grid=new(){Columns=6,Rows=8}}]};
         LayoutState Edit(LayoutState source,Action<LayoutState> edit){var draft=StateStore.Copy(source);edit(draft);StateStore.Validate(draft);return draft;}
+        check("folder-count-default-persistence-copy-and-screen-move",()=>
+        {
+            expect(JsonSerializer.Deserialize<Box>("{\"Name\":\"Legacy\"}")!.ShowItemCount,"legacy folders must retain count");
+            var source=Fixture();DesktopGridActions.ReconcileBoard(source.Boards[0]);
+            var edited=Edit(source,draft=>DesktopGridActions.SetFolderCount(draft.Boards[0],"folder",false));
+            expect(source.Boards[0].Boxes[0].ShowItemCount&&!edited.Boards[0].Boxes[0].ShowItemCount,"toggle must not mutate old revision");
+            var restored=JsonSerializer.Deserialize<LayoutState>(JsonSerializer.Serialize(edited))!;
+            DesktopGridActions.MoveScreen(restored.Boards[0],restored.Boards[1],"folder:folder");
+            expect(!restored.Boards[1].Boxes[0].ShowItemCount,"screen move lost count preference");
+            DesktopGridActions.SetFolderCount(restored.Boards[1],"folder",true);expect(restored.Boards[1].Boxes[0].ShowItemCount,"count could not be restored");
+            try{DesktopGridActions.SetFolderCount(restored.Boards[0],"missing",false);throw new Exception("stale folder accepted");}catch(LayoutEditException){}
+        });
         check("grid-integer-collision-overflow-and-failure-atomicity",()=>
         {
             var state=Fixture();DesktopGridActions.ReconcileBoard(state.Boards[0]);var before=JsonSerializer.Serialize(state);

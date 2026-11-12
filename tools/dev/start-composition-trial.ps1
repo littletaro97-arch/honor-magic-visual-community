@@ -5,7 +5,7 @@ if((& git -C $root branch --show-current).Trim() -ne 'codex/features' -or -not(T
 if($BenchmarkCycles -ne 0 -and ($BenchmarkCycles -lt 2 -or $BenchmarkCycles -gt 100 -or $AllDisplays)){throw 'Benchmark requires one window and 2-100 cycles.'}
 $stamp=Join-Path $root 'artifacts/composition-trial-build.current.json'
 function Fingerprint {
-    $paths=@(& git -C $root ls-files --cached --others --exclude-standard -- 'src/MagicCommunity' 'src/composition-trial' 'src/shared' 'assets/honor-fonts' 'widgets/desktop' 'tools/copy-honor-fonts.ps1' 'tools/dev/check-worktree.ps1' 'tools/dev/start-composition-trial.ps1')|Sort-Object -Unique
+    $paths=@(& git -C $root ls-files --cached --others --exclude-standard -- 'src/MagicCommunity' 'src/composition-trial' 'src/shared' 'tools/review/*.h' 'assets/honor-icons' 'assets/honor-fonts' 'widgets/desktop' 'tools/copy-honor-fonts.ps1' 'tools/dev/check-worktree.ps1' 'tools/dev/start-composition-trial.ps1')|Sort-Object -Unique
     $rows=@($paths|ForEach-Object {$_+':'+(Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash})
     $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($rows -join "`n"))))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }

@@ -20,7 +20,7 @@ internal sealed class CompositionPopupSession : IDisposable
     private sealed class Receipt(string token, string kind)
     {
         public string Token = token, Kind = kind;
-        public bool Waited;
+        public bool Waited, MusicView;
         public readonly Channel<JsonElement> Commands = Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(8) { SingleReader = true, FullMode = BoundedChannelFullMode.DropOldest });
         public readonly TaskCompletionSource<bool> Ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource<JsonElement> Done =
@@ -35,6 +35,7 @@ internal sealed class CompositionPopupSession : IDisposable
     private readonly Dictionary<string, Receipt> receipts = new(StringComparer.Ordinal);
     internal Func<DesktopItem,string?>? Icon;
     internal Func<ApplicationIconSource,string?>? ApplicationIcon;
+    internal Func<ApplicationIconSource,string>? ApplicationIdentity;
     internal Func<string,string?>? InlineImage;
     private readonly Dictionary<string,ApplicationIconSource> images=new(StringComparer.Ordinal);
     private void RegisterImages(JsonElement data)
@@ -59,7 +60,7 @@ internal sealed class CompositionPopupSession : IDisposable
             foreach(var row in rows.OfType<System.Text.Json.Nodes.JsonObject>().Where(r=>r["id"]?.GetValue<string>().StartsWith("app:",StringComparison.Ordinal)==true).Take(18)){
                 row.Remove("iconPng");string id=row["id"]!.GetValue<string>();
                 if(!images.TryGetValue(id,out var source)||!source.Application)continue;
-                string? uri=ApplicationIcon?.Invoke(source);
+                string? uri=ApplicationIcon?.Invoke(source);row["iconExecutable"]=ApplicationIdentity?.Invoke(source);
                 if(uri is null||!uri.StartsWith("data:image/png;base64,",StringComparison.Ordinal)||uri.Length-22>budget)continue;
                 string png=uri[22..];row["iconPng"]=png;budget-=png.Length;
             }
@@ -76,7 +77,7 @@ internal sealed class CompositionPopupSession : IDisposable
                 else if(Path.IsPathFullyQualified(source.Image)&&!source.Image.StartsWith(@"\\",StringComparison.Ordinal)&&File.Exists(source.Image))
                     uri=Icon?.Invoke(new DesktopItem{Name=Path.GetFileName(source.Image),Target=source.Image});
             }
-            return new{key=id,png=uri is not null&&uri.StartsWith("data:image/png;base64,",StringComparison.Ordinal)&&uri.Length<90000?uri[22..]:null};
+            return new{key=id,iconExecutable=images.TryGetValue(id,out var known)&&known.Application?ApplicationIdentity?.Invoke(known):null,png=uri is not null&&uri.StartsWith("data:image/png;base64,",StringComparison.Ordinal)&&uri.Length<90000?uri[22..]:null};
         }).ToArray()};
     }
     private Receipt? current;
@@ -106,12 +107,13 @@ internal sealed class CompositionPopupSession : IDisposable
     private async Task<object> OpenCore(JsonElement body, CancellationToken cancellation)
     {
         string kind = NativePopupIds.Canonical(body.GetProperty("widgetId").GetString() ?? "");
+        bool musicView=body.TryGetProperty("data",out var dataView)&&dataView.TryGetProperty("nativeMusicView",out var musicFlag)&&musicFlag.ValueKind==JsonValueKind.True;
         string? toggle=null;
         var receipt = await ui.InvokeAsync(() =>
                                            {
                                                if (disposed || !healthy() || !selected.Contains(kind))
                                                    return null;
-                                               if(current?.Kind==kind&&kind!="@magic/task-switcher")toggle=current.Token;
+                                               if(current?.Kind==kind&&current.MusicView==musicView&&kind!="@magic/task-switcher")toggle=current.Token;
                                                FinishCurrent("cancel");
                                                while (receipts.Count >= 8)
                                                {
@@ -121,7 +123,7 @@ internal sealed class CompositionPopupSession : IDisposable
                                                        JsonSerializer.SerializeToElement(new { action = "cancel" }));
                                                    receipts.Remove(old.Key);
                                                }
-                                               var next = new Receipt(Guid.NewGuid().ToString("N"), kind);
+                                               var next = new Receipt(Guid.NewGuid().ToString("N"), kind){MusicView=musicView};
                                                receipts.Add(next.Token, next);
                                                if(toggle is null)current = next;
                                                else{

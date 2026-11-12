@@ -50,6 +50,7 @@ internal static class NativeSystemPresentation
         ["magic.audio"] = ("音量", "IoVolumeHighOutline"),
         ["magic.player"] = ("媒体", "MagicMediaVideo"),
         ["magic.music"] = ("音乐", "MagicMusicNote"),
+        ["magic.pc-manager"] = ("电脑管家", "MagicPcManager"),
         ["magic.start"] = ("开始", "BsWindows"),
         ["magic.desktop"] = ("显示桌面", "FaComputer"),
         ["magic.recycle"] = ("回收站", "PiTrashDuotone"),
@@ -215,17 +216,17 @@ internal static class NativeSystemPresentation
             result[surfaceName] = groups;
         }
         // Keep independent temporal entries when no executable is readable; do not group all protected windows into one empty-path item.
-        foreach (var group in windows.Where(w => !configuredWindows.Contains(Text(w,"id"))).GroupBy(w => Text(w, "executable").Length == 0 ? Text(w, "id") : PathKey(Text(w, "executable"))))
+        foreach (var group in windows.Where(w => !configuredWindows.Contains(Text(w,"id"))).GroupBy(w => Text(w,"aumid").Length>0 ? "aumid:"+Text(w,"aumid").ToLowerInvariant() : Text(w, "executable").Length == 0 ? Text(w, "id") : PathKey(Text(w, "executable"))))
         {
             var first = group.First(); string path = Text(first, "executable"), id = "native-running:" + Text(first, "id");
-            result["dock"]!["center"]!.AsArray().Add(new JsonObject { ["id"] = id, ["key"] = id, ["type"] = "AppOrFile", ["icon"] = "native:application", ["path"] = path, ["label"] = Text(first, "title"), ["pinned"] = false, ["enabled"] = interactive, ["actionAvailable"] = interactive, ["windows"] = WindowLinks(group, id) });
+            result["dock"]!["center"]!.AsArray().Add(new JsonObject { ["id"] = id, ["key"] = id, ["type"] = "AppOrFile", ["icon"] = "native:application", ["path"] = path, ["iconExecutable"] = path, ["umid"] = Text(first,"aumid"), ["label"] = Text(first, "title"), ["pinned"] = false, ["enabled"] = interactive, ["actionAvailable"] = interactive, ["windows"] = WindowLinks(group, id) });
         }
         if(interactive){result["dockSettings"]!["showEndTask"]=false;if(Flag(snapshot,"uacPending"))result["dock"]!["right"]!.AsArray().Add(new JsonObject{["id"]="native:authorization",["key"]="native:authorization",["type"]="Uac",["label"]="Windows 授权请求",["enabled"]=true});}
         var catalog=new JsonArray();foreach(var (name,details) in Modules)catalog.Add(new JsonObject{["id"]=name,["label"]=details.Label,["icon"]=details.Icon});
         result["toolbarModules"]=new JsonArray(catalog.Where(v=>v!["id"]!.GetValue<string>()!="magic.player").Select(v=>v!.DeepClone()).ToArray());result["dockModules"]=new JsonArray(catalog.Where(v=>v!["id"]!.GetValue<string>()!="magic.music").Select(v=>v!.DeepClone()).ToArray());
         var notifications=Provider(providers,"notifications");result["notificationAccess"]=Flag(notifications,"available")&&Text(notifications,"access")=="allowed";
         var latest=Array(notifications,"notifications").OrderByDescending(n=>Text(n,"createdFileTime")).FirstOrDefault();
-        if(latest.ValueKind==JsonValueKind.Object)result["notification"]=new JsonObject{["key"]=Text(latest,"id"),["title"]=Text(latest,"appName"),["detail"]=string.Join("\n",Array(latest,"text").Select(n=>n.GetString()??""))};
+        if(latest.ValueKind==JsonValueKind.Object)result["notification"]=new JsonObject{["key"]=Text(latest,"id"),["appId"]=Text(latest,"appId"),["title"]=Text(latest,"appName"),["detail"]=string.Join("\n",Array(latest,"text").Select(n=>n.GetString()??""))};
         var audio = Provider(providers, "audio"); if (Flag(audio, "available")) result["volume"] = Number(audio, "volume");
         return result;
     }

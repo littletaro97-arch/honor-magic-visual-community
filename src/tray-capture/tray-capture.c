@@ -12,7 +12,7 @@ static PrivateIcon icons[MAGIC_TRAY_ICONS];
 static SRWLOCK localLock=SRWLOCK_INIT;
 static UINT releaseMessage;static ATOM attachedAtom;static HANDLE mapping,changed;static MagicTrayShared* shared;static UINT command;
 static ULONGLONG Created(DWORD pid){HANDLE p=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);FILETIME c,e,k,u;ULONGLONG value=0;if(p){if(GetProcessTimes(p,&c,&e,&k,&u))value=((ULONGLONG)c.dwHighDateTime<<32)|c.dwLowDateTime;CloseHandle(p);}return value;}
-static void Detach(void){if(shared)UnmapViewOfFile(shared);if(mapping)CloseHandle(mapping);if(changed)CloseHandle(changed);shared=NULL;mapping=NULL;changed=NULL;attachedAtom=0;ZeroMemory(icons,sizeof(icons));}
+static void Detach(void){ULONG i;if(shared)UnmapViewOfFile(shared);if(mapping)CloseHandle(mapping);if(changed)CloseHandle(changed);shared=NULL;mapping=NULL;changed=NULL;attachedAtom=0;for(i=0;i<MAGIC_TRAY_ICONS;i++)if(icons[i].used)ZeroMemory(&icons[i],sizeof(icons[i]));}
 static BOOL Attach(HWND window){ATOM atom=(ATOM)(ULONG_PTR)GetPropW(window,MAGIC_TRAY_PROPERTY);WCHAR name[100];HANDLE owner;BOOL valid=FALSE;if(!atom)return FALSE;if(atom==attachedAtom&&shared)return TRUE;Detach();if(!GlobalGetAtomNameW(atom,name,100)||wcsncmp(name,L"Local\\MagicNativeTray-",22))return FALSE;
     mapping=OpenFileMappingW(FILE_MAP_READ|FILE_MAP_WRITE,FALSE,name);if(!mapping)return FALSE;shared=(MagicTrayShared*)MapViewOfFile(mapping,FILE_MAP_READ|FILE_MAP_WRITE,0,0,sizeof(MagicTrayShared));if(!shared){Detach();return FALSE;}
     if(shared->signature!=MAGIC_TRAY_SIGNATURE||shared->version!=MAGIC_TRAY_VERSION||shared->bytes!=sizeof(MagicTrayShared)||shared->targetPid!=GetCurrentProcessId()){Detach();return FALSE;}
@@ -21,9 +21,7 @@ static BOOL Attach(HWND window){ATOM atom=(ATOM)(ULONG_PTR)GetPropW(window,MAGIC
 static BOOL Push(MagicTrayEntry const* item){LONG write,read;if(!shared)return FALSE;if(InterlockedCompareExchange(&shared->lock,1,0)!=0){InterlockedIncrement(&shared->dropped);return FALSE;}write=shared->writeIndex;read=shared->readIndex;if((ULONG)(write-read)>=MAGIC_TRAY_CAPACITY){InterlockedExchange(&shared->lock,0);InterlockedIncrement(&shared->dropped);SetEvent(changed);return FALSE;}shared->entries[(ULONG)write%MAGIC_TRAY_CAPACITY]=*item;InterlockedExchange(&shared->writeIndex,write+1);InterlockedExchange(&shared->lock,0);SetEvent(changed);return TRUE;}
 static BOOL HasGuid(GUID const* id){static GUID empty;return memcmp(id,&empty,sizeof(GUID))!=0;}
 static BOOL Same(MagicTrayEntry const* a,MagicTrayEntry const* b){if(HasGuid(&a->iconGuid)&&HasGuid(&b->iconGuid))return memcmp(&a->iconGuid,&b->iconGuid,sizeof(GUID))==0;return a->ownerHwnd==b->ownerHwnd&&a->id==b->id;}
-static BOOL Pixels(HICON icon,BYTE* out){BITMAPINFO info;HDC dc;HBITMAP bitmap,old;BYTE* pixels;ULONG n;BOOL good=FALSE;int width=MAGIC_TRAY_ICON_SIZE,height=MAGIC_TRAY_ICON_SIZE;ZeroMemory(&info,sizeof(info));info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height*2;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;dc=CreateCompatibleDC(NULL);if(!dc)return FALSE;bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,(void**)&pixels,NULL,0);if(!bitmap){DeleteDC(dc);return FALSE;}old=(HBITMAP)SelectObject(dc,bitmap);ZeroMemory(pixels,MAGIC_TRAY_BYTES);memset(pixels+MAGIC_TRAY_BYTES,255,MAGIC_TRAY_BYTES);
-    if(DrawIconEx(dc,0,0,icon,width,height,0,NULL,DI_NORMAL)&&DrawIconEx(dc,0,height,icon,width,height,0,NULL,DI_NORMAL)){GdiFlush();for(n=0;n<MAGIC_TRAY_BYTES;n+=4){int b=pixels[MAGIC_TRAY_BYTES+n]-pixels[n],g=pixels[MAGIC_TRAY_BYTES+n+1]-pixels[n+1],r=pixels[MAGIC_TRAY_BYTES+n+2]-pixels[n+2];int transparent=max(0,max(b,max(g,r)));out[n]=pixels[n];out[n+1]=pixels[n+1];out[n+2]=pixels[n+2];out[n+3]=(BYTE)(255-min(255,transparent));}good=TRUE;}
-    SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);return good;}
+#include "icon-pixels.h"
 static BOOL Decode(COPYDATASTRUCT const* data,MagicTrayEntry* out,HICON* icon){BYTE const* bytes;DWORD signature,message,size;ULONG count;*icon=NULL;ZeroMemory(out,sizeof(*out));if(!data||data->dwData!=1||data->cbData<32||data->cbData>65536||!data->lpData)return FALSE;bytes=(BYTE const*)data->lpData;memcpy(&signature,bytes,4);memcpy(&message,bytes+4,4);memcpy(&size,bytes+8,4);if(signature!=0x34753423||message>NIM_SETVERSION||size<24||size>sizeof(NOTIFYICONDATAW)||size+8>data->cbData)return FALSE;out->event=message;
     BOOL nativeLayout=(size==sizeof(NOTIFYICONDATAW)||size==NOTIFYICONDATAW_V3_SIZE||size==NOTIFYICONDATAW_V2_SIZE||size==NOTIFYICONDATAW_V1_SIZE);
     /* Win32 V3 (952 bytes) overlaps Win64 V2. Resolve the owner before
@@ -33,14 +31,16 @@ static BOOL Decode(COPYDATASTRUCT const* data,MagicTrayEntry* out,HICON* icon){B
     else{Nid32 n;ZeroMemory(&n,sizeof(n));memcpy(&n,bytes+8,min(size,sizeof(n)));out->ownerHwnd=n.hwnd;out->id=n.id;out->flags=n.flags;out->callbackMessage=n.message;*icon=(HICON)(ULONG_PTR)n.icon;out->version=n.version;out->state=n.state;out->stateMask=n.stateMask;if(n.flags&NIF_GUID)out->iconGuid=n.guid;count=min(128,(size>offsetof(Nid32,tip)?(size-(ULONG)offsetof(Nid32,tip))/sizeof(WCHAR):0));if(count)memcpy(out->tooltip,n.tip,count*sizeof(WCHAR));}
     out->tooltip[127]=0;GetWindowThreadProcessId((HWND)(ULONG_PTR)out->ownerHwnd,&out->ownerPid);return (out->ownerPid&&IsWindow((HWND)(ULONG_PTR)out->ownerHwnd))||HasGuid(&out->iconGuid);}
 // A capture attached after Qt started can first see a duplicate NIM_ADD or
-// NIM_MODIFY without its original NIM_SETVERSION. Qt 5 initializes uVersion=4 on its
+// NIM_MODIFY without its original NIM_SETVERSION. Qt initializes uVersion=4 on its
 // ordinary updates too. This is a bounded compatibility hint, not a
 // general interpretation of the uTimeout/uVersion union on NIM_MODIFY.
 static BOOL LateQtVersion4(MagicTrayEntry const* item){
     WCHAR name[128];ULONG required=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_SHOWTIP;
     if((item->event!=NIM_MODIFY&&item->event!=NIM_ADD)||item->version!=NOTIFYICON_VERSION_4||(item->flags&required)!=required||(item->flags&NIF_INFO)||item->id>0xffff)return FALSE;
     if(!GetClassNameW((HWND)(ULONG_PTR)item->ownerHwnd,name,128))return FALSE;
-    return wcsncmp(name,L"Qt5",3)==0&&wcsstr(name,L"TrayIconMessageWindowClass")!=NULL;
+    // The class prefix contains the Qt major version; Qt 6 uses the same
+    // documented framework callback contract. Do not key this on an app name.
+    return wcsncmp(name,L"Qt",2)==0&&name[2]>=L'0'&&name[2]<=L'9'&&wcsstr(name,L"TrayIconMessageWindowClass")!=NULL;
 }
 static void Capture(CWPRETSTRUCT const* call){MagicTrayEntry item;HICON icon;ULONG i,freeSlot=MAGIC_TRAY_ICONS;PrivateIcon* target=NULL;if(call->message!=WM_COPYDATA||!call->lParam||!Decode((COPYDATASTRUCT*)call->lParam,&item,&icon))return;
     // Existing clients may re-add the same identifier after TaskbarCreated.
@@ -57,7 +57,14 @@ static void Capture(CWPRETSTRUCT const* call){MagicTrayEntry item;HICON icon;ULO
     if(item.event==NIM_ADD&&call->lResult)target->data.version=0;
     if(item.event==NIM_SETVERSION)target->data.version=item.version;
     else if(target->data.version==MAGIC_TRAY_VERSION_UNKNOWN&&LateQtVersion4(&item))target->data.version=NOTIFYICON_VERSION_4;
-    if((item.flags&NIF_ICON)&&icon)target->data.hasPixels=Pixels(icon,target->data.pixels);
+    if(item.flags&NIF_ICON){
+        // A successful NIF_ICON update with NULL is an explicit blank frame,
+        // used by clients that blink without destroying their tray identity.
+        // A missing NIF_ICON (tooltip/state-only update) must retain the image.
+        BYTE pixels[MAGIC_TRAY_BYTES];
+        if(!icon&&call->lResult){ZeroMemory(target->data.pixels,sizeof(target->data.pixels));target->data.hasPixels=TRUE;target->data.pixelWidth=target->data.pixelHeight=1;}
+        else if(MagicTrayPixels(icon,pixels,&target->data.pixelWidth,&target->data.pixelHeight)){memcpy(target->data.pixels,pixels,sizeof(pixels));target->data.hasPixels=TRUE;}
+    }
     Push(&target->data);
 }
 static BOOL PostCallback(PrivateIcon const* item,UINT event,POINT point){

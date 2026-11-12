@@ -1,9 +1,11 @@
 #pragma once
 #include "native-center-panels.h"
+#include "native-music-panel.h"
 // preview70 functional organization on the current native rows/commands. Every
 // live action retains its authenticated id; rectangles are shared by UIA/input.
 inline void NativePopup::LayoutFunctionalPanel()
 {
+    if(MusicView()){LayoutMusicPanel();return;}
     if(CenterPanel()){LayoutCenterPanel();return;}
     functionalFrames.clear();functionalSections.clear();functionalPinned.clear();
     float left=18,right=width-18,y=58;functionalTop=58;functionalBottom=height-66;
@@ -142,6 +144,7 @@ inline void NativePopup::LayoutFunctionalPanel()
 }
 inline void NativePopup::PaintFunctionalPanel(ID2D1DeviceContext *c)
 {
+    if(MusicView()){PaintMusicPanel(c);return;}
     if(CenterPanel()){PaintCenterPanel(c);return;}
     NativePaint p(c,app.graphics,dark);auto &t=p.theme;
     if(!resizePainting){if(!NativeLowPower(app.model))p.Shadow({10,10,width-10,height-10},NativeMetrics::FloatingRadius);
@@ -150,10 +153,10 @@ inline void NativePopup::PaintFunctionalPanel(ID2D1DeviceContext *c)
     p.Text(power?Ui(L"电量与性能",L"Battery & performance"):media?Ui(L"声音",L"Sound"):caption,{22,20,width-(power?84:72),48},15,t.Ink(),600);
     auto icon=[&](std::wstring const &name,D2D1_RECT_F rect,D2D1_COLOR_F ink){if(!officialPanelIcons.Draw(c,name,rect,ink))p.Icon(bt?L"bluetooth":wifi?L"wifi":media?L"volume":L"info",rect,ink);};
     auto paint=[&](int index){auto const &r=rows[index];if(r.offscreen)return;auto rect=r.rect;
-        if(NativeConnectionRow(r)){p.Toggle(rect,r.value>.5,r.enabled);return;}
+        if(NativeConnectionRow(r)){PaintToggle(p,r,rect,true);return;}
         p.Interaction(InteractionRegion(index),r.active,materialPreview&&index==hover,index==focus);
         auto ink=r.enabled||r.control==L"label"?t.Ink():t.MaterialMuted();
-        if(DisplayView()&&r.control==L"toggle"){p.Text(r.label,{rect.left+4,rect.top,rect.right-54,rect.bottom},12.5f,ink,500);p.Toggle({rect.right-46,rect.top+16,rect.right-4,rect.top+38},r.value>.5,r.enabled);return;}
+        if(DisplayView()&&r.control==L"toggle"){p.Text(r.label,{rect.left+4,rect.top,rect.right-54,rect.bottom},12.5f,ink,500);PaintToggle(p,r,{rect.right-46,rect.top+16,rect.right-4,rect.top+38});return;}
         if(r.id==L"focus"){
             auto label=r.label;if(label.find(L"PriorityOnly")!=label.npos)label=Ui(L"勿扰模式 · 仅优先通知",L"Do not disturb · Priority only");
             else if(label.find(L"AlarmsOnly")!=label.npos)label=Ui(L"勿扰模式 · 仅闹钟",L"Do not disturb · Alarms only");
@@ -220,7 +223,7 @@ inline void NativePopup::PaintFunctionalPanel(ID2D1DeviceContext *c)
             float size=notification?20.f:24.f;icon(device?L"Bluetooth":network?L"WiFi4":track?L"Speaker":L"havenotify",{rect.left+2,rect.top+12,rect.left+2+size,rect.top+12+size},t.Ink());
             auto label=r.label;bool connected=network&&label.rfind(L"✓ ",0)==0;if(connected){label=label.substr(2);icon(L"checkmark2",{rect.right-22,rect.top+12,rect.right-2,rect.top+32},t.Accent());}
             if(!track||resizePainting||!mediaMarquees.contains(r.id))p.Text(label,{rect.left+36,rect.top+3,rect.right-(notification||connected?28:6),rect.top+30},12.5f,t.Ink(),500);
-            p.Text(r.detail,{rect.left+36,rect.top+30,rect.right-6,rect.bottom-4},11.5f,t.MaterialMuted(),400,DWRITE_TEXT_ALIGNMENT_LEADING,0,true);return;
+            if(!track||resizePainting||!mediaMarquees.contains(r.id+L":artist"))p.Text(r.detail,{rect.left+36,rect.top+30,rect.right-6,rect.bottom-4},11.5f,t.MaterialMuted(),400,DWRITE_TEXT_ALIGNMENT_LEADING,0,!track);return;
         }
         p.Fill(rect,t.Film(),NativeMetrics::ControlRadius);p.Text(r.label,rect,12.5f,ink,500,DWRITE_TEXT_ALIGNMENT_CENTER);
     };

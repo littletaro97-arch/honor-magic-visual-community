@@ -7,8 +7,9 @@ inline std::wstring HonorScheme(JsonObject const &preferences){
 }
 inline std::wstring HonorStem(std::wstring value){
     auto slash=value.find_last_of(L"/\\");if(slash!=value.npos)value=value.substr(slash+1);
-    auto dot=value.find_last_of(L'.');if(dot!=value.npos)value.resize(dot);
-    std::transform(value.begin(),value.end(),value.begin(),::towlower);return value;
+    std::transform(value.begin(),value.end(),value.begin(),::towlower);
+    if(value.ends_with(L".exe")||value.ends_with(L".lnk"))value.resize(value.size()-4);
+    std::erase_if(value,[](wchar_t c){return !(c>=L'a'&&c<=L'z'||c>=L'0'&&c<=L'9'||c>=0x4e00&&c<=0x9fff);});return value;
 }
 inline bool HonorCustomIcon(JsonObject const &item){
     if(Bool(item,L"customIcon"))return true;
@@ -17,16 +18,24 @@ inline bool HonorCustomIcon(JsonObject const &item){
     return ext==L".png"||ext==L".ico"||ext==L".jpg"||ext==L".jpeg"||ext==L".bmp";
 }
 inline HonorAppAsset const *HonorApplicationPath(std::wstring const &path){
-    auto dot=path.find_last_of(L'.');if(dot==path.npos)return nullptr;
-    auto ext=path.substr(dot);std::transform(ext.begin(),ext.end(),ext.begin(),::towlower);
-    if(ext!=L".exe"&&ext!=L".lnk")return nullptr;
-    static auto aliases=[](){std::map<std::wstring,HonorAppAsset const*> result;for(auto const &asset:HonorAppAssets)result.emplace(asset.alias,&asset);return result;}();
-    auto found=aliases.find(HonorStem(path));return found==aliases.end()?nullptr:found->second;
+    // Match actual executable identity, never a shortcut's editable caption.
+    std::wstring actual=path;std::transform(actual.begin(),actual.end(),actual.begin(),::towlower);
+    if(actual==L"steam:730")actual=L"cs2.exe";
+    else if(actual==L"steam:431960")actual=L"wallpaper_engine.exe";
+    else if(actual==L"aumid:windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel")actual=L"SystemSettings.exe";
+    auto dot=actual.find_last_of(L'.');if(dot==actual.npos)return nullptr;
+    auto ext=actual.substr(dot);std::transform(ext.begin(),ext.end(),ext.begin(),::towlower);
+    if(ext!=L".exe")return nullptr;
+    static auto aliases=[](){std::map<std::wstring,HonorAppAsset const*> result;for(auto const &asset:HonorAppAssets)result.emplace(HonorStem(asset.alias),&asset);return result;}();
+    auto found=aliases.find(HonorStem(actual));return found==aliases.end()?nullptr:found->second;
 }
 inline HonorAppAsset const *HonorApplication(JsonObject const &item){
     if(Str(item,L"type")!=L"AppOrFile"||HonorCustomIcon(item))return nullptr;
+    // A hosted UWP window can expose ApplicationFrameHost as its executable.
+    // Match the registered identity, never the localized/editable window title.
+    auto identity=Str(item,L"umid");if(!identity.empty())if(auto asset=HonorApplicationPath(L"aumid:"+identity))return asset;
     auto path=Str(item,L"iconExecutable");if(path.empty())path=Str(item,L"path");
-    return HonorApplicationPath(path);
+    auto found=HonorApplicationPath(path);return found?found:HonorApplicationPath(Str(item,L"path"));
 }
 inline std::wstring HonorDesktopFile(Tile const &item,std::wstring const &scheme,bool recycleFull){
     if(item.isFolder||item.card||!item.folder.empty())return L"";
@@ -39,7 +48,7 @@ inline std::wstring HonorDesktopFile(Tile const &item,std::wstring const &scheme
         if(item.target==L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")return white?L"library/系统图标/MyComputer/MyComputer_White.png":L"library/系统图标/MyComputer/MyComputer_Transparent.png";
         return L"";
     }
-    auto asset=HonorApplicationPath(item.target);return asset?(white?asset->white:asset->translucent):L"";
+    auto asset=HonorApplicationPath(item.iconExecutable.empty()?item.target:item.iconExecutable);return asset?(white?asset->white:asset->translucent):L"";
 }
 inline std::wstring HonorAppFile(JsonObject const &item,std::wstring const &scheme){
     auto asset=HonorApplication(item);return asset?(scheme==L"honor-translucent"?asset->translucent:asset->white):L"";

@@ -17,11 +17,65 @@ function Get-MagicProgramFiles64 {
         }finally{if($key){$key.Dispose()}}
     }finally{$machine.Dispose()}
 }
-function Get-MagicWin32Root { Join-Path (Get-MagicProgramFiles64) 'MagicCommunityDesktop' }
+function Get-MagicRegisteredRoot {
+    $machine=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key=$machine.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{80B5D4B1-E952-4B68-B38A-368DC145B09F}_is1')
+        try {
+            if(-not $key){return ''}
+            $value=[string]$key.GetValue('InstallLocation',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if(-not $value -or $value -notmatch '^[A-Za-z]:\\' -or $value.Contains('%') -or $key.GetValueKind('InstallLocation') -ne [Microsoft.Win32.RegistryValueKind]::String){throw '已有安装位置记录无效，请先修复安装记录。'}
+            return [IO.Path]::GetFullPath($value).TrimEnd('\')
+        }finally{if($key){$key.Dispose()}}
+    }finally{$machine.Dispose()}
+}
+function Get-MagicWin32Root {
+    if($script:MagicInstallTarget){return $script:MagicInstallTarget}
+    $registered=Get-MagicRegisteredRoot
+    if($registered){return $registered}
+    Join-Path (Get-MagicProgramFiles64) 'MagicCommunityDesktop'
+}
+function ConvertTo-MagicInstallPath([string]$Value) {
+    if(-not $Value -or $Value -notmatch '^[A-Za-z]:\\' -or $Value.Contains('"') -or $Value.Contains('%') -or $Value.Contains('/')){throw '请选择本机磁盘上的专用安装目录。'}
+    $path=[IO.Path]::GetFullPath($Value).TrimEnd('\')
+    if($path.Length -lt 4 -or $path.Length -gt 200){throw '安装位置不能是磁盘根目录或过长的路径。'}
+    foreach($part in $Value.Substring(3).TrimEnd('\').Split('\')){
+        if(-not $part -or $part.EndsWith('.') -or $part.EndsWith(' ') -or $part.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or $part -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$'){throw '安装目录含无效名称。'}
+    }
+    foreach($special in @([Environment]::GetFolderPath('Windows'),[Environment]::GetFolderPath('UserProfile'),[Environment]::GetFolderPath('CommonApplicationData'),(Join-Path (Get-MagicProgramFiles64) 'WindowsApps'))){
+        if($special -and ($path -ieq $special -or $path.StartsWith($special.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase))){throw '不能在系统目录、账户目录或应用数据目录内安装。'}
+    }
+    if($path -iin @((Get-MagicProgramFiles64),[Environment]::GetFolderPath('ProgramFilesX86'))){throw '请在程序目录中选择专用子目录。'}
+    return $path
+}
 function Assert-MagicInstallTarget([string]$Expected) {
-    $target=Get-MagicWin32Root
-    if(-not $Expected -or -not [IO.Path]::IsPathRooted($Expected) -or [IO.Path]::GetFullPath($Expected).TrimEnd('\') -ine $target){
-        throw '安装器目标与检查脚本的 64 位程序目录不一致，未退出程序或替换文件。'
+    $target=ConvertTo-MagicInstallPath $Expected
+    $registered=Get-MagicRegisteredRoot
+    if($registered -and $registered -ine $target){throw '更新会沿用原安装位置。若需另选位置，请先卸载并保留数据，再重新安装。'}
+    $script:MagicInstallTarget=$target
+}
+function Test-MagicUnsafeWrite($Rule,[switch]$Ancestor,[switch]$LinkFile,[switch]$VolumeRoot) {
+    if($Rule.AccessControlType -ne 'Allow' -or ($Rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -or $Rule.IdentityReference.Value -in @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')){return $false}
+    $mask=0x50000000L -bor [long][Security.AccessControl.FileSystemRights]::ChangePermissions -bor [long][Security.AccessControl.FileSystemRights]::TakeOwnership -bor [long][Security.AccessControl.FileSystemRights]::WriteAttributes -bor [long][Security.AccessControl.FileSystemRights]::WriteExtendedAttributes
+    # A verified physical drive root cannot itself be renamed/deleted like a
+    # directory. Its normal Modify ACE is not DELETE_CHILD on the protected app.
+    # Still reject child deletion, ACL/owner changes and GENERIC_ALL on the root.
+    if($Ancestor -and $VolumeRoot -and -not $LinkFile){$mask=0x10000000L -bor [long][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [long][Security.AccessControl.FileSystemRights]::ChangePermissions -bor [long][Security.AccessControl.FileSystemRights]::TakeOwnership;return ([long]$Rule.FileSystemRights -band $mask) -ne 0}
+    if(-not $Ancestor){$mask=$mask -bor [long][Security.AccessControl.FileSystemRights]::Write}
+    if(-not $LinkFile){$mask=$mask -bor [long][Security.AccessControl.FileSystemRights]::Delete -bor [long][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles}
+    return ([long]$Rule.FileSystemRights -band $mask) -ne 0
+}
+function Assert-MagicInstallAncestors([string]$Target) {
+    Initialize-MagicInstallNative
+    $parent=[IO.Path]::GetDirectoryName($Target)
+    if(-not (Test-Path -LiteralPath $parent -PathType Container)){throw '安装目录的上级文件夹不存在，请选择已有目录中的专用子目录。'}
+    for($part=$parent;$part;$part=[IO.Path]::GetDirectoryName($part)){
+        $item=Get-Item -LiteralPath $part -Force
+        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Test-Path -LiteralPath (Join-Path $part '.git'))){throw '安装目录不能位于链接或源码工作树内。'}
+        $acl=Get-Acl -LiteralPath $part
+        if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')){throw '上级目录由普通账户拥有，请选择管理员保护的安装位置。'}
+        $volumeRoot=[MagicCommunity.Setup.InstallNative]::IsFixedVolumeRoot($part)
+        foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if(Test-MagicUnsafeWrite $rule -Ancestor -VolumeRoot:$volumeRoot){throw ('上级目录允许普通用户替换应用：'+$part+'。请选择管理员保护的安装位置。')}}
     }
 }
 function Test-MagicInstalledProcessPath([string]$Path) {
@@ -164,11 +218,29 @@ function Assert-MagicCommonLinkProtected([string]$Path) {
         foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
             # Delete rights on public shortcuts are normal. Content writes and
             # ACL changes are not. Updates atomically replace the link entry.
-            if($rule.AccessControlType -eq 'Allow' -and -not($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and ([long]$rule.FileSystemRights -band (0x50000000 -bor [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership)) -and $rule.IdentityReference.Value -notin $privileged){throw '公共快捷方式允许普通用户改写，未以管理员权限覆盖。'}
+            if(Test-MagicUnsafeWrite $rule -Ancestor:$item.PSIsContainer -LinkFile){throw '公共快捷方式或上级目录允许普通用户改写内容，未以管理员权限覆盖。'}
         }
         if($part -iin @([Environment]::GetFolderPath('CommonDesktopDirectory'),[Environment]::GetFolderPath('CommonPrograms'))){break}
         if([IO.Path]::GetDirectoryName($part) -eq [IO.Path]::GetPathRoot($part)){break}
     }
+}
+function Get-MagicInstallTree([string]$Target) {
+    $queue=[Collections.Generic.Queue[string]]::new();$queue.Enqueue($Target);$count=0
+    while($queue.Count){
+        $path=$queue.Dequeue();$item=Get-Item -LiteralPath $path -Force
+        if(++$count -gt 8192){throw '安装文件数量异常。'}
+        if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw '安装路径含链接，未修改。'}
+        $item
+        if($item.PSIsContainer){foreach($child in Get-ChildItem -LiteralPath $path -Force){$queue.Enqueue($child.FullName)}}
+    }
+}
+function New-MagicInstallAcl {
+    $acl=[Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true,$false);$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach($spec in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@('S-1-5-32-545','ReadAndExecute'))){
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($spec[0]),$spec[1],'ContainerInherit,ObjectInherit','None','Allow'))
+    }
+    return $acl
 }
 function Sync-MagicOwnedShortcuts($Folders,[switch]$Common) {
     $root=Get-MagicWin32Root;$target=Join-Path $root 'MagicNativeEntry.exe'

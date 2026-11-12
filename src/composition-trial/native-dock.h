@@ -100,7 +100,7 @@ inline void NativeBar::PaintDockItem(ID2D1DeviceContext *c,int index,bool retain
         for(int n=0;n<3;++n){float a=(25+n*6.f)*s;p.Line(a,19*s,a+3*s,19*s,ink,1.5f*s);p.Line(a,37*s,a+3*s,37*s,ink,1.5f*s);float b=(21+n*6.f)*s;p.Line(25*s,b,25*s,b+3*s,ink,1.5f*s);p.Line(43*s,b,43*s,b+3*s,ink,1.5f*s);}
         auto text=std::to_wstring(static_cast<int>(Num(item,L"recoveryCount")));p.Fill({iconSize-20,0,iconSize,17},D2D1::ColorF(0x0067c0),8);p.Text(text,{iconSize-20,0,iconSize,17},9,D2D1::ColorF(0xffffff),600,DWRITE_TEXT_ALIGNMENT_CENTER);return;
     }
-    if(Str(item,L"type")==L"Separator") {if(!row.id.starts_with(L"@boundary:")){if(Vertical())p.Line(0,h/2,w,h/2,t.Muted());else p.Line(w/2,0,w/2,h,t.Muted());}return;}
+    if(Str(item,L"type")==L"Separator") {if(!row.id.starts_with(L"@boundary:")&&Bool(item,L"separatorVisible",true)){if(Vertical())p.Line(0,h/2,w,h/2,t.Muted());else p.Line(w/2,0,w/2,h,t.Muted());}return;}
     app.honor.Scheme(HonorScheme(app.model.preferences));
     auto officialFile=HonorDockFile(item,HonorScheme(app.model.preferences));bool officialPainted=false;
     // Official application PNGs include their own white/translucent plate.

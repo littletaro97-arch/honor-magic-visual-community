@@ -10,6 +10,16 @@ namespace MagicCommunity;
 public sealed class DesktopIcons : IDisposable
 {
     private readonly ConcurrentDictionary<string,string> cache=new();
+    private readonly ConcurrentDictionary<string,string> identities=new();
+    private long identityVersion;
+    internal long IdentityVersion=>Interlocked.Read(ref identityVersion);
+    internal string ApplicationIdentity(ApplicationIconSource source)=>identities.GetValueOrDefault("application:"+source.Stamp,"");
+    internal string DesktopIdentity(DesktopItem item)=>identities.GetValueOrDefault(DesktopKey(item,false),"");
+    private static string DesktopKey(DesktopItem item,bool bitmap){
+        string id=(bitmap?"panel:":"")+DesktopGridActions.ItemId(item);
+        if(!item.IsVirtual&&!item.IsFolder&&!item.Target.StartsWith(@"\\",StringComparison.Ordinal)&&(bitmap||Path.GetExtension(item.Target).ToLowerInvariant() is ".exe" or ".lnk" or ".url"))try{var file=new FileInfo(item.Target);if(file.Exists)id+=":"+file.Length+":"+file.LastWriteTimeUtc.Ticks;}catch(IOException){}catch(UnauthorizedAccessException){}
+        return id;
+    }
     private readonly BlockingCollection<(DesktopItem Item,string Id,bool Bitmap,ApplicationIconSource? Application)> queue=new(512);
     private readonly Action notify;
     private readonly Timer notifyTimer;
@@ -29,7 +39,7 @@ public sealed class DesktopIcons : IDisposable
         if(disposed||!watchedImages.ContainsKey(path))return;
         string prefix="panel:"+DesktopGridActions.ItemId(new DesktopItem{Target=path})+":";
         foreach(var key in cache.Keys.Where(key=>(key.StartsWith(prefix,StringComparison.Ordinal)||key.StartsWith("application:",StringComparison.Ordinal)&&key.Contains(path,StringComparison.OrdinalIgnoreCase))))
-            if(cache.TryRemove(key,out var value)){Interlocked.Add(ref bytes,-value.Length*2L);ages.TryRemove(key,out _);completed.TryRemove(key,out _);}
+            if(cache.TryRemove(key,out var value)){Interlocked.Add(ref bytes,-value.Length*2L);ages.TryRemove(key,out _);completed.TryRemove(key,out _);identities.TryRemove(key,out _);}
         changedImages[path]=0;
         QueueNotification();
     }
@@ -59,7 +69,7 @@ public sealed class DesktopIcons : IDisposable
     {
         string prefix="application:"+identity+"|";
         foreach(var id in cache.Keys.Where(id=>id.StartsWith(prefix,StringComparison.Ordinal)))
-            if(cache.TryRemove(id,out var prior)){Interlocked.Add(ref bytes,-prior.Length*2L);ages.TryRemove(id,out _);completed.TryRemove(id,out _);}
+            if(cache.TryRemove(id,out var prior)){Interlocked.Add(ref bytes,-prior.Length*2L);ages.TryRemove(id,out _);completed.TryRemove(id,out _);identities.TryRemove(id,out _);}
     }
     internal string? GetApplication(ApplicationIconSource source)
     {
@@ -68,15 +78,15 @@ public sealed class DesktopIcons : IDisposable
     }
     public string? Get(DesktopItem item,bool bitmap=false)
     {
-        string id=(bitmap?"panel:":"")+DesktopGridActions.ItemId(item);
-        if(bitmap&&!item.IsVirtual){WatchImage(item.Target);try{var file=new FileInfo(item.Target);id+=":"+file.Length+":"+file.LastWriteTimeUtc.Ticks;}catch(IOException){return null;}}
+        string id=DesktopKey(item,bitmap);
+        if(bitmap&&!item.IsVirtual)WatchImage(item.Target);
         if(DesktopFileDrop.IsRecycleBin(item))id+=":v"+Interlocked.Read(ref recycleVersion);
         return Cached(id,item,bitmap,null);
     }
     private string? Cached(string id,DesktopItem item,bool bitmap,ApplicationIconSource? application)
     {
         if(cache.TryGetValue(id,out var icon)){ages[id]=Interlocked.Increment(ref age);return icon.Length==0?null:icon;}
-        if(cache.Count>=512){foreach(var cold in ages.OrderBy(p=>p.Value).Take(32)){if(completed.TryRemove(cold.Key,out _)&&cache.TryRemove(cold.Key,out var prior)){Interlocked.Add(ref bytes,-prior.Length*2L);ages.TryRemove(cold.Key,out _);}}}
+        if(cache.Count>=512){foreach(var cold in ages.OrderBy(p=>p.Value).Take(32)){if(completed.TryRemove(cold.Key,out _)&&cache.TryRemove(cold.Key,out var prior)){Interlocked.Add(ref bytes,-prior.Length*2L);ages.TryRemove(cold.Key,out _);identities.TryRemove(cold.Key,out _);}}}
         if(cache.Count>=512||disposed)return null;
         if(cache.TryAdd(id,"")){
             ages[id]=Interlocked.Increment(ref age);
@@ -89,7 +99,7 @@ public sealed class DesktopIcons : IDisposable
         Interlocked.Increment(ref recycleVersion);
         string key=DesktopGridActions.ItemId(new DesktopItem{Target=ShellClipboardCommands.RecycleBinTarget});
         foreach(string id in cache.Keys.Where(id=>id.StartsWith(key+":v",StringComparison.Ordinal)||id.StartsWith("panel:"+key+":v",StringComparison.Ordinal)))
-            if(cache.TryRemove(id,out var prior)){Interlocked.Add(ref bytes,-prior.Length*2L);ages.TryRemove(id,out _);completed.TryRemove(id,out _);}
+            if(cache.TryRemove(id,out var prior)){Interlocked.Add(ref bytes,-prior.Length*2L);ages.TryRemove(id,out _);completed.TryRemove(id,out _);identities.TryRemove(id,out _);}
     }
     private void Run()
     {
@@ -102,6 +112,8 @@ public sealed class DesktopIcons : IDisposable
                 if(disposed)break;
                 try
                 {
+                    string resolved="";try{if(entry.Application is {Application:true} app)resolved=ApplicationIconIdentity.Resolve(app.Path,app.Umid);else if(!entry.Item.IsVirtual&&!entry.Item.IsFolder)resolved=ApplicationIconIdentity.Resolve(entry.Item.Target);}catch(Exception e)when(e is not OutOfMemoryException){}
+                    if(cache.ContainsKey(entry.Id)){identities[entry.Id]=resolved;if(resolved.Length>0){if(entry.Application is null)Interlocked.Increment(ref identityVersion);if(!disposed)QueueNotification();}}
                     var icon=entry.Application is { } application?application.Read(message=>ApplicationIconFailed?.Invoke(message)):Read(entry.Item,entry.Bitmap);
                     if(icon is not null&&cache.ContainsKey(entry.Id)&&Interlocked.Read(ref bytes)+icon.Length*2<=16*1024*1024)
                     {cache[entry.Id]=icon;Interlocked.Add(ref bytes,icon.Length*2);if(!disposed)QueueNotification();}
@@ -145,11 +157,16 @@ public sealed class DesktopIcons : IDisposable
                     // Generic panel icons retain their 256px input bound; shell images opt into bounded resizing.
                     int limit=resizeImage?2048:256;
                     if(frame.PixelWidth<1||frame.PixelWidth>limit||frame.PixelHeight<1||frame.PixelHeight>limit)return null;
+                    if(resizeImage)return NativeMenuBitmap.EncodeIcon(frame);
                     System.Windows.Media.Imaging.BitmapSource image=frame;
-                    int largest=Math.Max(frame.PixelWidth,frame.PixelHeight);if(resizeImage&&largest>128){double scale=128.0/largest;image=new TransformedBitmap(frame,new System.Windows.Media.ScaleTransform(scale,scale));}
                     var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(image));using var output=new MemoryStream();png.Save(output);
                     return output.Length<=65536?"data:image/png;base64,"+Convert.ToBase64String(output.ToArray()):null;
                 }
+                // Ask Shell for a high resolution icon, not its fixed 32px
+                // SHGFI_ICON fallback. Extraction stays on the existing STA and
+                // inside the same 16 MiB cache; no content thumbnails are read.
+                try { if (ApplicationIconSource.ShellImage(item.Target) is { } icon) return icon; }
+                catch (Exception error) when (error is not OutOfMemoryException) { }
                 SHGetFileInfoPath(item.Target,0,ref info,(uint)Marshal.SizeOf<FileInfoNative>(),flags);
             }
             if(info.Icon==IntPtr.Zero)return null;

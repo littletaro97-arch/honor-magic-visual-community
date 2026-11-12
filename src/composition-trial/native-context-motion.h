@@ -4,6 +4,15 @@ namespace NativeContextMotion {
 inline constexpr int RootMs=380, SubMs=300, CloseMs=110;
 struct Placement {int x=0,y=0;float2 origin{};};
 struct ChildSide {int x=0;bool flipped=false;};
+inline RECT ExcludeBar(RECT work,std::wstring const &side,int boundary,float scale){
+    // The Dock can be overlay/auto-hidden, so rcWork alone does not reserve it.
+    int gap=static_cast<int>(std::ceil(6*scale));
+    if(side==L"Bottom")work.bottom=std::clamp<LONG>(boundary-gap,work.top+1,work.bottom);
+    else if(side==L"Top")work.top=std::clamp<LONG>(boundary+gap,work.top,work.bottom-1);
+    else if(side==L"Left")work.left=std::clamp<LONG>(boundary+gap,work.left,work.right-1);
+    else if(side==L"Right")work.right=std::clamp<LONG>(boundary-gap,work.left+1,work.right);
+    return work;
+}
 inline ChildSide ChildX(int parentLeft,int parentRight,int width,RECT work,float scale){
     int gap=static_cast<int>(std::ceil(2*scale)),pad=static_cast<int>(std::ceil(6*scale));
     int right=parentRight+gap,left=parentLeft-width-gap;

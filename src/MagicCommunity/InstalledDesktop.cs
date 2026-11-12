@@ -38,14 +38,26 @@ internal static class InstalledDesktop
         string root = ValidatePath(record.GetProperty("dataRoot").GetString()!);
         installId = record.GetProperty("installId").GetString();
         if (!Guid.TryParseExact(installId, "N", out _)) throw new InvalidDataException("安装记录标识无效。");
-        var marker = Read(Path.Combine(root, ".magic-data.json"));
-        if (marker.GetProperty("protocol").GetString() != Protocol || marker.GetProperty("installId").GetString() != installId ||
-            marker.GetProperty("ownerSid").GetString() != WindowsIdentity.GetCurrent().User!.Value ||
-            !string.Equals(Path.GetFullPath(marker.GetProperty("dataRoot").GetString()!).TrimEnd('\\'), root, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("数据目录归属不一致；请使用安装向导检查。");
+        if(!HasProfile(record,WindowsIdentity.GetCurrent().User!.Value))return null;
         InstalledProfileDirectories.PrepareBackendDirectory(root);
         currentRoot = root;
         return root;
+    }
+    internal static bool HasProfile(JsonElement record,string sid)
+    {
+        string root=ValidatePath(record.GetProperty("dataRoot").GetString()!);
+        if(record.GetProperty("protocol").GetString()!=Protocol||record.GetProperty("ownerSid").GetString()!=sid||!Guid.TryParseExact(record.GetProperty("installId").GetString(),"N",out _))
+            throw new InvalidDataException("安装记录不属于当前账户或标识无效。");
+        // A removed data marker is recoverable, but an offline disk is not an
+        // empty profile. Never silently replace it with a new default profile.
+        if(!Directory.Exists(Path.GetPathRoot(root)))throw new InvalidDataException("数据磁盘当前不可用："+Path.GetPathRoot(root)+"。请连接原磁盘后再启动。");
+        JsonElement marker;
+        try{marker=Read(Path.Combine(root,".magic-data.json"));}
+        catch(Exception error)when(error is FileNotFoundException or DirectoryNotFoundException){return false;}
+        if(marker.GetProperty("protocol").GetString()!=Protocol||marker.GetProperty("installId").GetString()!=record.GetProperty("installId").GetString()||marker.GetProperty("ownerSid").GetString()!=sid||
+            !string.Equals(Path.GetFullPath(marker.GetProperty("dataRoot").GetString()!).TrimEnd('\\'),root,StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("数据目录归属不一致；请保留文件并检查安装记录。");
+        return true;
     }
     internal static string ValidatePath(string value)
     {
@@ -68,7 +80,7 @@ internal static class InstalledDesktop
                 throw new InvalidDataException("数据须位于专用子目录。");
         foreach (var protectedPath in new[] { Environment.GetFolderPath(Environment.SpecialFolder.Windows),
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Packages") })
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Packages"),Win32Installation.CodeRoot })
             if (!string.IsNullOrEmpty(protectedPath) && (path.Equals(protectedPath, StringComparison.OrdinalIgnoreCase) || path.StartsWith(protectedPath.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidDataException("不能使用系统或应用包目录存放用户数据。");
         for (string? ancestor = path; ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))

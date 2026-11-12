@@ -8,9 +8,9 @@ Windows 桌面宿主由独立 Win32/.NET 程序实现。桌面 Widget 的当前�
 
 ## 当前预览版
 
-当前候选版本为 **v0.4.9**，面向 Windows 11 x64。 [下载页与发行说明](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/tag/v0.4.9)。安装包为未签名的测试版；当前仍有需用户实际验收的项目，详见发行说明，不代表所有桌面、多屏或游戏场景均已验收通过。
+当前候选版本为 **v0.5.1**，面向 Windows 11 x64。 [下载页与发行说明](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/tag/v0.5.1)。安装包为未签名的测试版；当前图标 / Dock 清晰度仍有用户反馈，其他需实机验收的项目详见发行说明，不代表所有桌面、多屏或游戏场景均已验收通过。
 
-在发行页的 **Assets** 下载 `MagicCommunity-Setup-0.4.9-x64-unsigned.zip`，解压后运行安装向导。安装受保护目录时由 Windows 正常显示 UAC。请勿关闭系统安全提示；未签名安装包会显示 Windows 的发布者警告。
+在发行页的 **Assets** 下载 `MagicCommunity-Setup-0.5.1-x64-unsigned.zip`，解压后运行安装向导。安装受保护目录时由 Windows 正常显示 UAC。请勿关闭系统安全提示；未签名安装包会显示 Windows 的发布者警告。
 
 ## 目录
 
@@ -35,3 +35,4 @@ Windows 桌面宿主由独立 Win32/.NET 程序实现。桌面 Widget 的当前�
 ## 许可证
 
 项目原创软件代码采用 **GNU Affero General Public License v3.0-only（AGPL-3.0-only）**，许可全文见根目录 [`LICENSE`](LICENSE)。此许可不覆盖带有独立许可或权利声明的第三方组件、HONOR 素材、商标和其他品牌资产；具体范围见 [`NOTICE.md`](NOTICE.md) 与 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。HONOR 素材依项目负责人确认取得的单独再分发授权提供，不因项目源代码许可而改变权利归属。
+

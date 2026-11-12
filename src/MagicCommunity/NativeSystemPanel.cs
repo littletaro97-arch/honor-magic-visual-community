@@ -27,7 +27,7 @@ internal sealed class NativeSystemPanel
     internal static JsonElement Object(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.Object ? field : default;
     internal static Command Backend(string operation, object arguments, string valueField = "", bool boolean = false) => new(operation, JsonSerializer.SerializeToNode(arguments)!.AsObject(), ValueField: valueField, BooleanValue: boolean);
     internal static Command Local(string action, object? arguments = null) => new("", arguments is null ? new() : JsonSerializer.SerializeToNode(arguments)!.AsObject(), action);
-    internal static NativeSystemPanel Build(string kind, NativeSystemPresentationSession.Published state, bool powerView = false, bool notificationQuiet = false, bool displayView = false)
+    internal static NativeSystemPanel Build(string kind, NativeSystemPresentationSession.Published state, bool powerView = false, bool notificationQuiet = false, bool displayView = false, bool honorServices = false)
     {
         kind=NativePopupIds.Canonical(kind);
         var panel = new NativeSystemPanel();
@@ -164,13 +164,13 @@ internal sealed class NativeSystemPanel
                 panel.Add("power-mode","Windows 电源模式",Text(power,"mode") switch{"efficiency"=>"更长续航","balanced"=>"平衡","performance"=>"最佳性能",_=>"暂不可用"},Local("settings-uri",new{uri="ms-settings:powersleep"}));
                 string saver=power.ValueKind==JsonValueKind.Object&&power.TryGetProperty("powerSaver",out var saverValue)&&saverValue.ValueKind==JsonValueKind.Number&&saverValue.TryGetInt32(out int saverFlag)&&saverFlag is 0 or 1?(saverFlag==1?"已开启":"已关闭"):"暂不可用";
                 panel.Add("saver","Windows 节电模式",saver,Local("settings-uri",new{uri="ms-settings:powersleep"}));
-                panel.Add("honor-mode","荣耀性能模式","暂不可用");
+                if(honorServices)panel.Add("honor-mode","荣耀性能模式","暂不可用");
                 foreach(var item in Array(power,"batteries")){
                     string name=Text(item,"name");double health=Number(item,"healthPercent",-1),cycles=Number(item,"cycleCount",-1);
                     panel.Add("battery:"+Text(item,"id"),name.Length>0?name:"电池信息",$"电池健康度 {(health>=0?health.ToString("0")+"%":"暂不可用")} · 循环次数 {(cycles>=0?cycles.ToString("0"):"暂不可用")}");
                 }
                 if(!Array(power,"batteries").Any()&&Number(power,"batteryPercent",-1)>=0)panel.Add("battery:unknown","电池信息","电池健康度 暂不可用 · 循环次数 暂不可用");
-                panel.Add("honor-manager","荣耀电脑管家","打开管家",Local("honor-power"));
+                if(honorServices)panel.Add("honor-manager","荣耀电脑管家","打开管家",Local("honor-power"));
                 panel.Add("quick-back","快捷设置",command:Local("panel",new{kind="@magic/quick-settings"}));Setting("system-power","电源设置","ms-settings:powersleep");break;
             case "@magic/quick-settings":
                 if(displayView){

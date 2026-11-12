@@ -134,7 +134,14 @@ public sealed partial class DesktopMenuHost(string root,bool startSuspended=fals
             using var response=JsonDocument.Parse(line);
             if(!response.RootElement.GetProperty("ok").GetBoolean()){
                 if(response.RootElement.TryGetProperty("cancelled",out var cancelledResult)&&cancelledResult.ValueKind==JsonValueKind.True)throw new OperationCanceledException("Windows 文件操作已取消。");
-                throw new InvalidOperationException(response.RootElement.GetProperty("error").GetString());
+                int hresult=response.RootElement.TryGetProperty("hresult",out var hr)&&hr.TryGetInt32(out int code)?code:unchecked((int)0x80131509);
+                trace?.Invoke("desktop_menu_query_failed",new{operation=op,hresult=$"0x{hresult:X8}",
+                    phase=response.RootElement.TryGetProperty("phase",out var phase)?phase.GetString():null,
+                    backgroundSource=response.RootElement.TryGetProperty("backgroundSource",out var source)?source.GetInt32():-1,
+                    errorType=response.RootElement.TryGetProperty("errorType",out var type)?type.GetString():null,
+                    backgroundFailures=response.RootElement.TryGetProperty("backgroundFailures",out var failures)?failures:(JsonElement?)null,
+                    pathDepth=path.Length,selectionCount=selection?.Length??(target is null?0:1)});
+                throw new QueryFailure(response.RootElement.GetProperty("error").GetString(),hresult);
             }
             if(!command)lock(stateGate){VerifyEpoch(requestEpoch);if(worker!=running||active!=id)throw new OperationCanceledException("Menu expired.");querying=false;}
             if(op=="open"&&response.RootElement.TryGetProperty("providerBackoff",out var failed)&&failed.ValueKind==JsonValueKind.Array)
@@ -288,9 +295,13 @@ public sealed partial class DesktopMenuHost(string root,bool startSuspended=fals
                 writer.WriteLine(JsonSerializer.Serialize(new{ok=true,data=result,providerBackoff=op=="open"?ShellExplorerCommands.Failures.Export():null},Wire));
                 if(op is "jump-open" or "track" or "invoke" or "file" or "create" or "properties" or "clipboard" or "prepare" or "import" or "group")return 0;
             }
-            catch(Exception error){DesktopContextMenu.Trace?.Invoke(error.ToString());writer.WriteLine(JsonSerializer.Serialize(new{ok=false,error=error.Message,cancelled=error is OperationCanceledException||error.HResult==unchecked((int)0x80270000)||error.HResult==unchecked((int)0x800704C7)},Wire));return 1;}
+            catch(Exception error){DesktopContextMenu.Trace?.Invoke(error.ToString());writer.WriteLine(JsonSerializer.Serialize(new{ok=false,error=error.Message,hresult=error.HResult,errorType=error.GetType().Name,phase=menu.QueryStage,backgroundSource=menu.BackgroundSource,backgroundFailures=menu.BackgroundFailures,cancelled=error is OperationCanceledException||error.HResult==unchecked((int)0x80270000)||error.HResult==unchecked((int)0x800704C7)},Wire));return 1;}
         }
         return 0;
+    }
+    private sealed class QueryFailure:InvalidOperationException
+    {
+        internal QueryFailure(string? message,int hresult):base(message){HResult=hresult;}
     }
     public static async Task<object> TestContract(string root)
     {

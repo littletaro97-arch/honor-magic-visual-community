@@ -5,7 +5,7 @@
     "honor-white",
     "honor-translucent"
   ],
-  "applicationMatch": "Exact executable stem or exact pinned shortcut name; no substring/window title matching.",
+  "applicationMatch": "Resolved shortcut target, exact executable, package or Steam identity; no display-name or window-title guessing.",
   "apps": [
     {
       "id": "360Safe",

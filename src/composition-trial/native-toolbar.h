@@ -45,7 +45,7 @@ inline float NativeBar::ToolbarGroupWidth(std::vector<JsonObject> const &items){
     float result=0;std::wstring previous;for(size_t i=0;i<items.size();++i){auto compound=CompoundOwner(items[i]);if(i&&(compound.empty()||compound!=previous))result+=iconSize*.25f;if(!compound.empty()&&compound!=previous)result+=padding;result+=ItemWidth(items[i]);previous=compound;}return result;
 }
 inline void NativeBar::PaintToolbarItem(ID2D1DeviceContext *c,int index) {
-    auto row=rows[index];auto item=entries[index];NativePaint p(c,app.graphics,dark);auto &theme=p.theme;
+    auto row=rows[index];auto item=entries[index];NativePaint p(c,app.graphics,ToolbarItemDark(index));auto &theme=p.theme;
     if(Str(item,L"type")==L"Extension"){PaintExtensionItem(c,index);return;}
     app.honor.Scheme(HonorScheme(app.model.preferences));
     float w=row.rect.right-row.rect.left,h=row.rect.bottom-row.rect.top;D2D1_RECT_F local{0,0,w,h};
@@ -114,15 +114,19 @@ inline void NativeBar::SyncToolbarVisuals() {
         float extra=dock?8.f:!CompoundOwner(entries[i]).empty()?2.f:0.f;int pw=std::max(1,static_cast<int>(std::ceil((w+2*extra)*dpi/96))),ph=std::max(1,static_cast<int>(std::ceil((h+2*extra)*dpi/96)));
         size_t size=static_cast<size_t>(pw)*ph*4;
         auto item=entries[i];auto source=dock?Str(item,L"key"):Str(item,L"module");if(source.empty())source=row.id;
-        JsonObject ink;for(auto field:{L"label",L"icon",L"imageVersion",L"plugin",L"type",L"hasPlayer",L"playing",L"lyricsText",L"canPlay",L"canPause",L"canPrevious",L"canNext",L"artist",L"badge",L"trashCount",L"glyph",L"passive",L"squareIcon",L"batteries",L"acLineStatus",L"dockVolume",L"dockMuted",L"dockConnected",L"dockLanguage",L"dockKeyboard",L"dockDnd",L"dockOnline",L"dockWifi",L"batteryPercent",L"bluetoothOn",L"wifiSignal",L"hasNotifications",L"networkStateKnown",L"customIcon",L"iconExecutable",L"extensionSession",L"extensionRevision",L"extensionGranted"})if(auto value=item.TryLookup(field))ink.Insert(field,value);
+        JsonObject ink;for(auto field:{L"label",L"icon",L"imageVersion",L"plugin",L"type",L"separatorVisible",L"hasPlayer",L"playing",L"lyricsText",L"canPlay",L"canPause",L"canPrevious",L"canNext",L"artist",L"badge",L"trashCount",L"glyph",L"passive",L"squareIcon",L"batteries",L"acLineStatus",L"dockVolume",L"dockMuted",L"dockConnected",L"dockLanguage",L"dockKeyboard",L"dockDnd",L"dockOnline",L"dockWifi",L"batteryPercent",L"bluetoothOn",L"wifiSignal",L"hasNotifications",L"networkStateKnown",L"customIcon",L"iconExecutable",L"extensionSession",L"extensionRevision",L"extensionGranted"})if(auto value=item.TryLookup(field))ink.Insert(field,value);
         if(dock){auto windows=item.GetNamedArray(L"windows",JsonArray{});Put(ink,L"instances",static_cast<double>(windows.Size()));if(Bool(settings,L"showWindowTitle")&&windows.Size())Put(ink,L"title",Str(windows.GetAt(0).GetObject(),L"title"));}
-        std::wstring signature=HonorScheme(app.model.preferences)+std::wstring(ink.Stringify())+L":"+std::to_wstring(pw)+L":"+std::to_wstring(ph)+L":"+std::to_wstring(dpi)+L":"+std::to_wstring(dark)+L":"+std::to_wstring(Preview70Theme::revision)+L":"+std::to_wstring(dock&&i==focus&&!barDrag)+L":"+std::to_wstring(downId==row.id)+L":"+std::to_wstring(i==focus?mediaHover:-1)+L":"+std::to_wstring(downId==row.id?mediaDown:-1)+L":"+std::wstring(ToolbarContent(item).Stringify());
+        std::wstring signature=HonorScheme(app.model.preferences)+std::wstring(ink.Stringify())+L":"+std::to_wstring(pw)+L":"+std::to_wstring(ph)+L":"+std::to_wstring(dpi)+L":"+std::to_wstring(ToolbarItemDark(i))+L":"+std::to_wstring(Preview70Theme::revision)+L":"+std::to_wstring(dock&&i==focus&&!barDrag)+L":"+std::to_wstring(downId==row.id)+L":"+std::to_wstring(i==focus?mediaHover:-1)+L":"+std::to_wstring(downId==row.id?mediaDown:-1)+L":"+std::wstring(ToolbarContent(item).Stringify());
         // Official Dock clock is a static asset; its tooltip still follows the minute event.
         if(row.id==L"@magic/pages")signature+=std::to_wstring(pageAlpha);
         if(auto badge=shell.icons.find(Str(item,L"key")+L":badge");badge!=shell.icons.end())signature+=std::to_wstring(reinterpret_cast<UINT_PTR>(badge->second.bitmap.get()));
 
         if(auto icon=shell.icons.find(dock?Str(item,L"key"):row.id);icon!=shell.icons.end())signature+=std::to_wstring(reinterpret_cast<UINT_PTR>(icon->second.bitmap.get()));
-        if(fresh) {v.group=app.graphics.compositor.CreateContainerVisual();v.visual=app.graphics.compositor.CreateSpriteVisual();v.hoverLayer=app.graphics.compositor.CreateContainerVisual();v.hoverLayer.Children().InsertAtBottom(v.visual);v.group.Children().InsertAtBottom(v.hoverLayer);toolbarLayer.Children().InsertAtTop(v.group);v.group.Offset({(row.rect.left-extra)*dpi/96,(row.rect.top-extra)*dpi/96,0});}
+        float3 target{(row.rect.left-extra)*dpi/96,(row.rect.top-extra)*dpi/96,0};
+        // Snap resting raster surfaces, retaining continuous drag/animation
+        // coordinates. Fractional final placement blurs text and icon pixels.
+        if(!ghost){target.x=std::round(target.x);target.y=std::round(target.y);}
+        if(fresh) {v.group=app.graphics.compositor.CreateContainerVisual();v.visual=app.graphics.compositor.CreateSpriteVisual();v.hoverLayer=app.graphics.compositor.CreateContainerVisual();v.hoverLayer.Children().InsertAtBottom(v.visual);v.group.Children().InsertAtBottom(v.hoverLayer);toolbarLayer.Children().InsertAtTop(v.group);v.group.Offset(target);}
         if(v.retireAt){v.group.StopAnimation(L"Scale");v.group.Scale({1,1,1});v.group.StopAnimation(L"Opacity");v.group.Opacity(1);}
         v.retireAt=0;v.visual.Size({static_cast<float>(pw),static_cast<float>(ph)});v.group.Size({static_cast<float>(pw),static_cast<float>(ph)});v.group.CenterPoint({pw/2.f,ph/2.f,0});
         if(signature!=v.rasterKey) {
@@ -135,7 +139,6 @@ inline void NativeBar::SyncToolbarVisuals() {
         }
         size_t priorMediaBytes=v.mediaBytes;SyncMediaTitle(v,i,extra);bytes=bytes-priorMediaBytes+v.mediaBytes;
         SyncMediaSize(v,i,extra,fresh);
-        float3 target{(row.rect.left-extra)*dpi/96,(row.rect.top-extra)*dpi/96,0};
         if(ghost){v.group.StopAnimation(L"Offset");v.group.Offset(target);toolbarLayer.Children().Remove(v.group);toolbarLayer.Children().InsertAtTop(v.group);}
         else if(!fresh&&(row.rect.left!=v.rect.left||row.rect.top!=v.rect.top||dockShiftX!=0||dockShiftY!=0))AnimateToolbarOffset(v.group,target);
         if(fresh&&!first&&!ghost&&!(dock&&dockReorderHoverBlocked))ToolbarFade(v.group,true);
@@ -147,7 +150,7 @@ inline void NativeBar::SyncToolbarVisuals() {
         auto &v=it->second;if(live.contains(it->first)){++it;continue;}
         if(!v.retireAt){bool ghost=it->first.starts_with(L"@drag:");
             if(ghost&&dropRows.contains(it->first.substr(6))){auto target=std::find_if(rows.begin(),rows.end(),[&](auto const &r){return r.id==it->first.substr(6);});
-                if(target!=rows.end()){auto index=static_cast<size_t>(target-rows.begin());float extra=dock?8.f:CompoundOwner(entries[index]).empty()?0.f:2.f;AnimateToolbarOffset(v.group,{(target->rect.left-extra)*dpi/96,(target->rect.top-extra)*dpi/96,0},true);}
+                if(target!=rows.end()){auto index=static_cast<size_t>(target-rows.begin());float extra=dock?8.f:CompoundOwner(entries[index]).empty()?0.f:2.f;AnimateToolbarOffset(v.group,{std::round((target->rect.left-extra)*dpi/96),std::round((target->rect.top-extra)*dpi/96),0},true);}
                 v.retireAt=now+250;
             }else{if(dock&&(dockShiftX!=0||dockShiftY!=0))AnimateToolbarOffset(v.group,{(v.rect.left-8)*dpi/96+dockShiftX,(v.rect.top-8)*dpi/96+dockShiftY,0});ToolbarFade(v.group,false);v.retireAt=now+(dock&&!barDrag?NativeInteractionMotion::DockBodyMs:200);}
             SetTimer(hwnd,97,260,nullptr);
@@ -159,4 +162,44 @@ inline void NativeBar::SyncToolbarVisuals() {
     ULONGLONG next=dropUntil?dropUntil:MAXULONGLONG;for(auto const &[_,v]:toolbarVisuals)if(v.retireAt)next=std::min(next,v.retireAt);
     if(next!=MAXULONGLONG)SetTimer(hwnd,97,static_cast<UINT>(std::clamp<ULONGLONG>(next>now?next-now:1,1,1000)),nullptr);else KillTimer(hwnd,97);
 
+}
+
+inline bool NativeBar::ToolbarItemDark(int index)const{
+    if(dock||!Bool(app.model.preferences,L"toolbarAdaptiveText",true)||index<0||index>=static_cast<int>(rows.size()))return dark;
+    auto it=toolbarInk.find(rows[index].id);return it==toolbarInk.end()?dark:it->second;
+}
+inline void NativeBar::ScheduleToolbarContrast(){
+    if(!hwnd||dock)return;
+    bool wanted=Bool(app.model.preferences,L"toolbarAdaptiveText",true)&&visible&&!edge&&!toolbarOccluded&&!gridSuppressed&&!NativeLowPower(app.model)&&(TransparentToolbar()||NativeGlassAvailable());
+    if(!wanted){NativeToolbarContrastWork::Cancel(contrastWork);KillTimer(hwnd,NativeToolbarContrast::Timer);contrastScheduled=false;toolbarContrast.available=false;toolbarInk.clear();return;}
+    if(!contrastScheduled&&!contrastWork)contrastScheduled=SetTimer(hwnd,NativeToolbarContrast::Timer,120,nullptr)!=0;
+}
+inline void NativeBar::SampleToolbarContrast(){
+    KillTimer(hwnd,NativeToolbarContrast::Timer);contrastScheduled=false;
+    if(!Bool(app.model.preferences,L"toolbarAdaptiveText",true)||!visible||!IsWindowVisible(hwnd)||edge||toolbarOccluded||gridSuppressed||NativeLowPower(app.model)||!(TransparentToolbar()||NativeGlassAvailable())){bool hadInk=!toolbarInk.empty();toolbarInk.clear();toolbarContrast.available=false;if(hadInk&&visible)SyncToolbarVisuals();return;}
+    if(contrastWork)return;
+    if(!hidingToolbar&&!barDrag)contrastWork=NativeToolbarContrastWork::Queue(hwnd,dpi);
+    if(!contrastWork)contrastScheduled=SetTimer(hwnd,NativeToolbarContrast::Timer,NativeToolbarContrast::Interval,nullptr)!=0;
+}
+inline void NativeBar::FinishToolbarContrast(WPARAM identity){
+    if(!contrastWork||reinterpret_cast<WPARAM>(contrastWork.get())!=identity||!contrastWork->ready.load(std::memory_order_acquire))return;
+    auto completed=std::exchange(contrastWork,{});RECT current{};
+    bool wanted=Bool(app.model.preferences,L"toolbarAdaptiveText",true)&&hwnd&&visible&&!edge&&!toolbarOccluded&&!gridSuppressed&&!NativeLowPower(app.model)&&(TransparentToolbar()||NativeGlassAvailable());
+    if(!wanted){ScheduleToolbarContrast();return;}
+    bool changed=false;
+    if(!completed->cancelled&&!hidingToolbar&&!barDrag&&completed->result.available&&GetWindowRect(hwnd,&current)&&EqualRect(&current,&completed->bounds)&&dpi==completed->dpi){
+        toolbarContrast=completed->result;
+        POINT origin{};ClientToScreen(hwnd,&origin);std::set<std::wstring> live;
+        for(int i=0;i<static_cast<int>(rows.size());++i){auto const &row=rows[i];live.insert(row.id);if(row.offscreen)continue;
+            // A popup/other window covering the bar must not select its ink.
+            POINT sample{origin.x+static_cast<LONG>((row.rect.left+row.rect.right)*dpi/192),origin.y+static_cast<LONG>(height*dpi/192)};
+            if(GetAncestor(WindowFromPoint(sample),GA_ROOT)!=hwnd)continue;
+            auto it=toolbarInk.find(row.id);std::optional<bool> previous;if(it!=toolbarInk.end())previous=it->second;
+            bool next=NativeToolbarContrast::Light(toolbarContrast.At(row.rect,width),previous);
+            if(!previous||*previous!=next){toolbarInk[row.id]=next;changed=true;}
+        }
+        std::erase_if(toolbarInk,[&](auto const &entry){return !live.contains(entry.first);});
+    }
+    contrastScheduled=SetTimer(hwnd,NativeToolbarContrast::Timer,NativeToolbarContrast::Interval,nullptr)!=0;
+    if(changed){SyncToolbarVisuals();}
 }

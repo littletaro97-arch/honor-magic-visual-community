@@ -33,9 +33,13 @@ inline void NativePopup::SyncMediaMarquees(){
     std::set<std::wstring> live;marqueeBytes=0;
     for(auto const &[_,m]:mediaMarquees)marqueeBytes+=m.bytes;
     for(auto const &r:rows)if(r.id.starts_with(L"track:")&&!r.offscreen){
-        auto &m=mediaMarquees[r.id];size_t prior=m.bytes;D2D1_RECT_F text{contentX+r.rect.left+36,contentY+r.rect.top+3,contentX+r.rect.right-6,contentY+r.rect.top+30};
-        bool retained=m.Sync(app.graphics,popupRoot,r.label,text,{contentX+14,contentY+functionalTop,contentX+width-14,contentY+functionalBottom},dpi/96,dark,NativeMotion(app.model),std::min<size_t>(512*1024,2*1024*1024-(marqueeBytes-prior)));
-        marqueeBytes=marqueeBytes-prior+m.bytes;if(retained)live.insert(r.id);
+        for(bool artist:{false,true}){
+            auto id=r.id+(artist?L":artist":L"");auto &m=mediaMarquees[id];size_t prior=m.bytes;
+            D2D1_RECT_F text{contentX+r.rect.left+36,contentY+r.rect.top+(artist?30:3),contentX+r.rect.right-6,contentY+(artist?r.rect.bottom-4:r.rect.top+30)};
+            size_t used=marqueeBytes-prior,budget=used>=2*1024*1024?0:std::min<size_t>(512*1024,2*1024*1024-used);
+            bool retained=m.Sync(app.graphics,popupRoot,artist?r.detail:r.label,text,{contentX+14,contentY+functionalTop,contentX+width-14,contentY+functionalBottom},dpi/96,dark,NativeMotion(app.model),budget,artist?11.5f:12.5f,artist?400:500,artist);
+            marqueeBytes=used+m.bytes;if(retained)live.insert(id);
+        }
     }
     for(auto i=mediaMarquees.begin();i!=mediaMarquees.end();)if(!live.contains(i->first)){i->second.Release();i=mediaMarquees.erase(i);}else ++i;
 }

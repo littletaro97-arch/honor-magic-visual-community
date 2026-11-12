@@ -52,7 +52,7 @@ inline void NativeExtensionText(NativeBar &bar,NativePaint &paint,std::wstring c
     paint.c->DrawTextLayout({bounds.left,bounds.top},layout.get(),paint.Color(paint.theme.Ink()),D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 inline void NativeBar::PaintExtensionItem(ID2D1DeviceContext *c,int index){
-    NativePaint p(c,app.graphics,dark);auto item=entries[index];float width=std::max(0.f,rows[index].rect.right-rows[index].rect.left-padding),height=rows[index].rect.bottom-rows[index].rect.top;
+    NativePaint p(c,app.graphics,ToolbarItemDark(index));auto item=entries[index];float width=std::max(0.f,rows[index].rect.right-rows[index].rect.left-padding),height=rows[index].rect.bottom-rows[index].rect.top;
     auto view=NativeExtensionView(item);float size=iconSize*.8f;c->PushAxisAlignedClip({0,0,width,height},D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     try{
         if(auto overlay=NativeExtensionOverlay(view)){

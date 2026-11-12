@@ -31,12 +31,13 @@ internal sealed class NativeToolbarLyrics : IDisposable
     private CancellationTokenSource? lookup;
     private Track? track;
     private Line[] lines = [];
-    private string timeline = "", text = "";
+    private string timeline = "", text = "", lookupState = "idle";
     private long generation, positionTimestamp;
     private double position, duration, rate = 1;
     private bool playing, enabled, disposed;
     private DateTimeOffset nextRequest;
     internal string Text { get { lock (gate) return text; } }
+    internal string Status { get { lock (gate) return lookupState; } }
 
     internal NativeToolbarLyrics(Action changed, TimeProvider? clock = null, Func<Track, CancellationToken, Task<Line[]>>? fetch = null, HttpClient? http = null)
     {
@@ -52,7 +53,7 @@ internal sealed class NativeToolbarLyrics : IDisposable
             {
                 if (disposed || !enabled && track is null && lookup is null) return;
                 enabled = playing = false; ++generation; lookup?.Cancel(); lookup = null;
-                track = null; lines = []; text = timeline = ""; cache.Clear(); cacheOrder.Clear();
+                track = null; lines = []; text = timeline = ""; lookupState = "idle"; cache.Clear(); cacheOrder.Clear();
                 timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             }
             return;
@@ -68,11 +69,11 @@ internal sealed class NativeToolbarLyrics : IDisposable
             enabled = wanted;
             if (next != track)
             {
-                ++generation; lookup?.Cancel(); lookup = null; track = next; lines = []; text = ""; timeline = "";
+                ++generation; lookup?.Cancel(); lookup = null; track = next; lines = []; text = ""; timeline = ""; lookupState = "idle";
                 if (next is not null)
                 {
-                    if (cache.TryGetValue(next, out var hit) && hit.Expires > clock.GetUtcNow()) lines = hit.Lines;
-                    else { lookup = new(); _ = Load(next, generation, lookup); }
+                    if (cache.TryGetValue(next, out var hit) && hit.Expires > clock.GetUtcNow()) { lines = hit.Lines; lookupState = lines.Length > 0 ? "ready" : "missing"; }
+                    else { lookupState = "loading"; lookup = new(); _ = Load(next, generation, lookup); }
                 }
             }
             // The same projection can be republished by a lyric callback. Do not
@@ -92,17 +93,20 @@ internal sealed class NativeToolbarLyrics : IDisposable
         }
     }
 
-    internal void Project(JsonObject view, JsonElement media)
+    internal void Project(JsonObject view, JsonElement media, bool cardDemand = false)
     {
         var rows = new[] { "left", "center", "right" }.SelectMany(s => view["toolbar"]?[s]?.AsArray() ?? []);
         var targets = rows.Where(r => r?["nativeModule"]?.GetValue<string>() == "magic.music").ToArray();
         bool visible = view["monitors"]?.AsArray().Any(m => m?["toolbar"]?.GetValue<bool>() == true) == true;
-        Observe(visible && targets.Length != 0, media);
-        string current = Text;
+        Observe(cardDemand || visible && targets.Length != 0, media);
+        string current, state; lock(gate) { current = text; state = lookupState; }
         foreach (var row in targets)
         {
             row!["lyricsText"] = row["playing"]?.GetValue<bool>()==true?current:"";
-            row["tooltip"] = row["playing"]?.GetValue<bool>()==true?"音乐 · 点击左侧暂停":"音乐 · 点击左侧播放";
+            string title=row["label"]?.GetValue<string>()??"", artist=row["artist"]?.GetValue<string>()??"";
+            row["lyricsStatus"] = state;
+            string status=state switch { "loading"=>"正在查找同步歌词", "missing"=>"暂无匹配的同步歌词", "error"=>"歌词源暂时不可用", _=>"" };
+            row["tooltip"] = string.Join(" · ",new[]{title,artist,status,row["playing"]?.GetValue<bool>()==true?"点击左侧暂停":"点击左侧播放"}.Where(s=>s.Length>0));
         }
     }
 
@@ -112,20 +116,21 @@ internal sealed class NativeToolbarLyrics : IDisposable
         {
             // Keep rapid track switching off the UI thread and coalesce it.
             await Task.Delay(TimeSpan.FromMilliseconds(350), clock, source.Token).ConfigureAwait(false);
-            Line[] found;
+            Line[] found; bool failed = false;
             try { found = await fetch(requested, source.Token).ConfigureAwait(false); }
             catch (Exception e) when (e is HttpRequestException or IOException or JsonException or InvalidDataException or OperationCanceledException or RegexMatchTimeoutException or ArgumentException)
-            { if (source.IsCancellationRequested) return; found = []; }
-            bool notify;
+            { if (source.IsCancellationRequested) return; found = []; failed = true; }
             lock (gate)
             {
                 if (disposed || source.IsCancellationRequested || revision != generation || track != requested) return;
-                if (!cache.ContainsKey(requested)) cacheOrder.Enqueue(requested);
-                cache[requested] = new(found, clock.GetUtcNow().AddMinutes(found.Length > 0 ? 30 : 5));
+                if (!failed) {
+                    if (!cache.ContainsKey(requested)) cacheOrder.Enqueue(requested);
+                    cache[requested] = new(found, clock.GetUtcNow().AddMinutes(found.Length > 0 ? 30 : 5));
+                }
                 while (cacheOrder.Count > 16) cache.Remove(cacheOrder.Dequeue());
-                lines = found; notify = Advance();
+                lines = found; lookupState = failed ? "error" : found.Length > 0 ? "ready" : "missing"; Advance();
             }
-            if (notify) changed();
+            changed(); // Publish missing/error too, even when there was no lyric text.
         }
         catch (OperationCanceledException) { }
         finally { lock (gate) { if (ReferenceEquals(lookup, source)) lookup = null; } source.Dispose(); }
@@ -190,6 +195,9 @@ internal sealed class NativeToolbarLyrics : IDisposable
         return new(query);
     }
     private static string MatchKey(string value) => string.Concat(value.Normalize(NormalizationForm.FormKC).Where(c=>!char.IsWhiteSpace(c))).ToUpperInvariant();
+    // Catalogue punctuation may differ; retain every word inside the brackets
+    // so a named version can never fall through to a different recording.
+    private static string TitleKey(string value) => MatchKey(value).Replace("(", "").Replace(")", "");
     private static string[] Artists(string value) => value.Normalize(NormalizationForm.FormKC)
         .Split(['/', '、', ',', '&', ';', '•'],StringSplitOptions.RemoveEmptyEntries).Select(MatchKey).Where(s=>s.Length>0).Distinct().Order().ToArray();
     internal static string SearchTitle(string value)
@@ -203,12 +211,12 @@ internal sealed class NativeToolbarLyrics : IDisposable
         }
         return title;
     }
-    internal static Uri SearchQuery(Track value) => new("https://lrclib.net/api/search?track_name="+Uri.EscapeDataString(SearchTitle(value.Title)));
+    internal static Uri SearchQuery(Track value) => new("https://lrclib.net/api/search?track_name="+Uri.EscapeDataString(string.Join(" ",SearchTitle(value.Title).Normalize(NormalizationForm.FormKC).Replace("("," ").Replace(")"," ").Split((char[]?)null,StringSplitOptions.RemoveEmptyEntries))));
     internal static Line[] ReadResponse(Track requested, JsonElement response)
     {
         string title=NativeSystemPanel.Text(response,"trackName");
-        bool exact=MatchKey(requested.Title)==MatchKey(title);
-        bool annotation=requested.DurationSeconds>0&&MatchKey(SearchTitle(requested.Title))==MatchKey(SearchTitle(title));
+        bool exact=TitleKey(requested.Title)==TitleKey(title);
+        bool annotation=requested.DurationSeconds>0&&TitleKey(SearchTitle(requested.Title))==TitleKey(SearchTitle(title));
         if ((!exact&&!annotation) || !Artists(requested.Artist).SequenceEqual(Artists(NativeSystemPanel.Text(response,"artistName"))) ||
             requested.DurationSeconds > 0 && Math.Abs(NativeSystemPanel.Number(response, "duration") - requested.DurationSeconds) > 2 ||
             NativeSystemPanel.Flag(response, "instrumental")) return [];
@@ -228,7 +236,7 @@ internal sealed class NativeToolbarLyrics : IDisposable
     private async Task<(JsonElement Value,bool CanSearch)> ReadHttp(Uri uri,int limit,CancellationToken cancellation)
     {
         TimeSpan delay;lock(gate)delay=nextRequest-clock.GetUtcNow();
-        if(delay>TimeSpan.FromMinutes(5))return(default,false);
+        if(delay>TimeSpan.FromMinutes(5))throw new HttpRequestException("Lyrics source is in Retry-After backoff.");
         if(delay>TimeSpan.Zero)await Task.Delay(delay,clock,cancellation).ConfigureAwait(false);
         lock(gate)nextRequest=clock.GetUtcNow().AddMilliseconds(500);
         using var timeout=CancellationTokenSource.CreateLinkedTokenSource(cancellation);timeout.CancelAfter(TimeSpan.FromSeconds(8));
@@ -239,13 +247,14 @@ internal sealed class NativeToolbarLyrics : IDisposable
         if(response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable){
             var retry=response.Headers.RetryAfter;var backoff=retry?.Delta??(retry?.Date is {} date?date-clock.GetUtcNow():TimeSpan.FromMinutes(1));
             lock(gate){var now=clock.GetUtcNow();double seconds=Math.Max(backoff.TotalSeconds,1)+Random.Shared.NextDouble();nextRequest=seconds<(DateTimeOffset.MaxValue-now).TotalSeconds?now.AddSeconds(seconds):DateTimeOffset.MaxValue;}
-            return(default,false);
+            throw new HttpRequestException("Lyrics source temporarily unavailable.",null,response.StatusCode);
         }
         if(response.StatusCode==HttpStatusCode.NotFound)return(default,true);
-        if(!response.IsSuccessStatusCode||response.Content.Headers.ContentLength>limit||!string.Equals(response.Content.Headers.ContentType?.MediaType,"application/json",StringComparison.OrdinalIgnoreCase))return(default,false);
+        response.EnsureSuccessStatusCode();
+        if(response.Content.Headers.ContentLength>limit||!string.Equals(response.Content.Headers.ContentType?.MediaType,"application/json",StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Invalid lyrics response.");
         using var stream=await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
         using var buffer=new MemoryStream();byte[] bytes=new byte[8192];int read;
-        while((read=await stream.ReadAsync(bytes,timeout.Token).ConfigureAwait(false))!=0){if(buffer.Length+read>limit)return(default,false);buffer.Write(bytes,0,read);}
+        while((read=await stream.ReadAsync(bytes,timeout.Token).ConfigureAwait(false))!=0){if(buffer.Length+read>limit)throw new InvalidDataException("Lyrics response exceeds limit.");buffer.Write(bytes,0,read);}
         using var json=JsonDocument.Parse(buffer.ToArray(),new JsonDocumentOptions{MaxDepth=8});return(json.RootElement.Clone(),true);
     }
     internal async Task<Line[]> Fetch(Track value, CancellationToken cancellation)

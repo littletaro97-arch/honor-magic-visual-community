@@ -16,6 +16,8 @@ internal sealed class NativeSystemPresentationSession : IAsyncDisposable
     private Published? published;
     internal Published State => Volatile.Read(ref published) ?? throw new InvalidOperationException("Native session is not initialized.");
     private readonly Dictionary<string, JsonElement> providers = new();
+    private readonly NativeInputNotice inputNotice = new();
+    private string inputForeground = "";
     private readonly HashSet<string> modules = new(StringComparer.Ordinal);
     private readonly HashSet<string> subscribed = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -139,13 +141,19 @@ internal sealed class NativeSystemPresentationSession : IAsyncDisposable
             try { providers[topic] = await backend.Request(topic + "-read", new { }, cancellation); if(topic=="tray"&&TrayProjection is not null)providers[topic]=TrayProjection(providers[topic]); failures.Remove(topic); }
             catch (NativeSystemRequestException e) { providers.Remove(topic); failures[topic] = e.ErrorCode?.ToString() ?? "unavailable"; }
         }
-        if (modules.Contains("magic.keyboard") && (topics is null || topics.Contains("input") || topics.Contains("windows-system")))
+        string focused = NativeSystemPanel.Text(NativeSystemPanel.Array(snapshot,"windows").FirstOrDefault(window=>NativeSystemPanel.Flag(window,"focused")),"hwnd");
+        if (modules.Contains("magic.keyboard") && (topics is null || topics.Contains("input") || topics.Contains("windows-system") || focused != inputForeground))
+        {
             providers["input"] = await backend.Request("input-read", new { }, cancellation);
+            inputNotice.Observe(providers["input"], topics?.Contains("input") == true);
+            inputForeground = focused;
+        }
     }
     private JsonObject Project()
     {
         Volatile.Write(ref published,new(configuration.Clone(),snapshot.Clone(),new Dictionary<string,JsonElement>(providers)));
         var view = NativeSystemPresentation.Project(snapshot, configuration, providers, interactive, backend.ProcessId);
+        if (inputNotice.Current is { } notice) view["inputNotice"] = notice.DeepClone();
         var errors = new JsonObject(); foreach (var (key, value) in failures) errors[key] = value;
         view["providerFailures"] = errors;
         return view;

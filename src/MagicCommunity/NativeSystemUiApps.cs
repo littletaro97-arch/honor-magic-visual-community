@@ -72,11 +72,12 @@ internal sealed partial class NativeSystemUiSession
                 rowId += "-" + offeredApps.Count;
                 offeredApps.Add(rowId, app);
             }
-            var item = new { id = app.Id, rowId, path = app.Target, umid = app.Aumid, label = app.Name };
+            var item = new { id = app.Id, rowId, path = app.Target, location = app.Location, umid = app.Aumid, label = app.Name };
             panel.Add(rowId, app.Name, command: app.Available ? Local("apps-item", item) : null, image: app.Target);
             var row = panel.Data["rows"]!.AsArray().Last()!;
             row["iconUmid"] = app.Aumid;
             row["hasPath"] = app.Target.Length > 0;
+            row["hasLocation"] = app.Location.Length > 0;
             row["secondaryTile"] = app.TileArguments is not null;
         }
         if (!scan.IsCompleted && list.Length == 0) panel.Add("apps-loading", "正在读取 Windows 开始菜单…");
@@ -176,14 +177,61 @@ internal sealed partial class NativeSystemUiSession
         var data = JsonNode.Parse(input.GetRawText())!.AsObject(); var icons = data["icons"]!.AsArray(); lock (trayPromoted) { foreach (var item in icons) if (trayPromoted.TryGetValue(item!["stableId"]!.GetValue<string>(), out bool promoted)) item["promoted"] = promoted; var sorted = icons.OrderBy(x => { int n = trayOrder.IndexOf(x!["stableId"]!.GetValue<string>()); return n < 0 ? int.MaxValue : n; }).Select(x => x!.DeepClone()).ToArray(); icons.Clear(); foreach (var item in sorted) icons.Add(item); }
         return JsonSerializer.SerializeToElement(data);
     }
-    private async Task TrayPreference(JsonElement args, JsonElement result)
+    private async Task TrayPreference(JsonElement args, JsonElement result, string token)
     {
-        string id = Text(args, "stableId"); lock (trayPromoted)
+        string receipt = Text(result, "reorderReceipt");
+        try
         {
-            if ((int)Number(result, "button") == 4) { bool current = Array(presentation.State.Providers.GetValueOrDefault("tray"), "icons").Where(x => Text(x, "stableId") == id).Any(x => Flag(x, "promoted")); trayPromoted[id] = !current; }
-            else { string destination = Text(result, "destination"); Command? target; lock (currentGate) { target = currentPanel?.Commands.GetValueOrDefault(destination); } if (target is null || target.Local != "tray") throw new InvalidDataException("Tray reorder target expired."); string targetId = Text(JsonSerializer.SerializeToElement(target.Arguments), "stableId"); foreach (var icon in Array(presentation.State.Providers.GetValueOrDefault("tray"), "icons")) { string key = Text(icon, "stableId"); if (!trayOrder.Contains(key)) trayOrder.Add(key); } trayOrder.Remove(id); trayOrder.Insert(Math.Max(0, trayOrder.IndexOf(targetId)), id); }
-            if (trayPromoted.Count > 256 || trayOrder.Count > 256) throw new InvalidOperationException("托盘偏好已达到上限。"); StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "tray-preferences.json"), JsonSerializer.Serialize(new { promoted = trayPromoted, order = trayOrder }), null);
+            string id = Text(args, "stableId"), targetId = "";
+            bool pin = (int)Number(result, "button") == 4;
+            var live = Array(await backend.Request("tray-read", new { }, stop.Token), "icons");
+            lock (currentGate)
+            {
+                if (currentToken != token || currentKind != "@magic/system-tray") return;
+                if (!pin)
+                {
+                    var target = currentPanel?.Commands.GetValueOrDefault(Text(result, "destination"));
+                    if (target is null || target.Local != "tray") throw new InvalidDataException("Tray reorder target expired.");
+                    targetId = Text(JsonSerializer.SerializeToElement(target.Arguments), "stableId");
+                }
+            }
+            if (!live.Any(icon => Text(icon, "stableId") == id)) throw new InvalidDataException("Tray source expired.");
+            lock (trayPromoted)
+            {
+                var promoted = new Dictionary<string, bool>(trayPromoted, StringComparer.Ordinal);
+                var order = trayOrder.ToList();
+                if (pin) promoted[id] = !(promoted.TryGetValue(id, out bool saved) ? saved : live.Any(icon => Text(icon, "stableId") == id && Flag(icon, "promoted")));
+                else
+                {
+                    var visible = live.Select(icon => Text(icon, "stableId")).Distinct(StringComparer.Ordinal)
+                        .OrderBy(key => { int n = order.IndexOf(key); return n < 0 ? int.MaxValue : n; }).ToArray();
+                    var moved = NativeTrayOrder.Move(visible, id, targetId, Flag(result, "after"));
+                    moved.AddRange(order.Where(key => !visible.Contains(key, StringComparer.Ordinal)));
+                    order = moved;
+                }
+                if (promoted.Count > 256 || order.Count > 256) throw new InvalidOperationException("托盘偏好已达到上限。");
+                StateStore.AtomicWrite(Path.Combine(deployment.DataDirectory, "tray-preferences.json"), JsonSerializer.Serialize(new { promoted, order }), null);
+                trayPromoted.Clear(); foreach (var pair in promoted) trayPromoted.Add(pair.Key, pair.Value);
+                trayOrder.Clear(); trayOrder.AddRange(order);
+            }
+            await backend.Request("tray-refresh", new { }, stop.Token);
         }
-        await backend.Request("tray-refresh", new { }, stop.Token);
+        finally
+        {
+            // A queued renderer command is not a save acknowledgement. Return
+            // authoritative order even on rejection, so the preview can settle
+            // or roll back without changing pin/hidden state or invoking an app.
+            if (receipt.Length > 0)
+            {
+                var state = presentation.State;
+                var providers = new Dictionary<string, JsonElement>(state.Providers);
+                providers["tray"] = ProjectTray(await backend.Request("tray-read", new { }, stop.Token));
+                var panel = NativeSystemPanel.Build("@magic/system-tray", state with { Providers = providers });
+                panel.Data["hostPid"] = Environment.ProcessId; panel.Data["trayReorderReceipt"] = receipt;
+                bool current;
+                lock (currentGate) { current = currentToken == token && currentKind == "@magic/system-tray"; if (current) currentPanel = panel; }
+                if (current) await popups.Update(JsonSerializer.SerializeToElement(new { token, data = panel.Data }), stop.Token);
+            }
+        }
     }
 }

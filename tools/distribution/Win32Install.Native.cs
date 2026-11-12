@@ -24,6 +24,17 @@ namespace MagicCommunity.Setup
     // before our bundled runtime is installed. It never launches a link target.
     public static class InstallNative
     {
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern uint GetDriveType(string root);
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern uint QueryDosDevice(string name,StringBuilder target,int size);
+        public static bool IsFixedVolumeRoot(string path) {
+            if(path==null||path.Length!=3||!char.IsLetter(path[0])||path[1]!=':'||path[2]!='\\'||GetDriveType(path)!=3)return false;
+            var target=new StringBuilder(32768);
+            if(QueryDosDevice(path.Substring(0,2),target,target.Capacity)==0)return false;
+            const string prefix=@"\Device\HarddiskVolume";string value=target.ToString();
+            if(!value.StartsWith(prefix,StringComparison.OrdinalIgnoreCase)||value.Length==prefix.Length)return false;
+            for(int i=prefix.Length;i<value.Length;i++)if(value[i]<'0'||value[i]>'9')return false;
+            return true; // Reject SUBST, network drives and caller-controlled aliases.
+        }
         [StructLayout(LayoutKind.Sequential)] private struct RmProcess { public uint Id; public System.Runtime.InteropServices.ComTypes.FILETIME Created; }
         [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct RmInfo {
             public RmProcess Process;

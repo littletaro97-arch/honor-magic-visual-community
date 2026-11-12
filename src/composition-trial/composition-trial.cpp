@@ -303,14 +303,16 @@ void Window::PaintIcon(ID2D1DeviceContext *c,Tile const &item,D2D1_RECT_F box)
     auto cached=icons.find(item.key);if(cached!=icons.end()){cached->second.age=++iconAge;c->DrawBitmap(cached->second.bitmap.get(),box,1,D2D1_INTERPOLATION_MODE_LINEAR);}
     else{NativePaint p(c,app.graphics,Preview70Theme::systemDark);p.Icon(item.isFolder?L"storage":L"apps",box,p.theme.Gray(700));}
 }
-void Window::PaintTile(ID2D1DeviceContext *c, Tile const &tile, D2D1_RECT_F r, int index,bool inFolder)
+void Window::PaintTile(ID2D1DeviceContext *c, Tile const &tile, D2D1_RECT_F r, int index,bool inFolder,bool detached)
 {
     if(pendingDragKeys.contains(tile.key)||!inFolder&&!tile.folder.empty()&&tile.folder==folderId)return;
     struct DragOpacity{ID2D1DeviceContext *context;bool active;~DragOpacity(){if(active)context->PopLayer();}} opacity{c,dragging&&dragKeys.contains(tile.key)};
     if(opacity.active)c->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,D2D1::IdentityMatrix(),.35f),nullptr);
     drawnTiles++;
     float unit=inFolder?1:RootUnit();
-    auto interaction=NativeRegion(r,inFolder?FolderLocalViewport(contentRect,panelRect):D2D1::RectF(0,0,width,height),tile.card||!tile.folder.empty()?NativeMetrics::PanelRadius:NativeMetrics::ControlRadius);
+    // Drag/avoidance surfaces use tile-local coordinates, not the folder's
+    // content viewport. Applying that viewport clips their top/left borders.
+    auto interaction=NativeRegion(r,detached?r:inFolder?FolderLocalViewport(contentRect,panelRect):D2D1::RectF(0,0,width,height),tile.card||!tile.folder.empty()?NativeMetrics::PanelRadius:NativeMetrics::ControlRadius);
     auto paintSelection=[&]{if(!GridEditing()&&(inFolder||folderId.empty())&&(selected.contains(tile.key)||focusKey==tile.key)){NativePaint selection(c,app.graphics,Preview70Theme::systemDark);selection.Interaction(interaction,selected.contains(tile.key),false,focusKey==tile.key);}};
     if(tile.card){PaintCard(c,tile,r);paintSelection();return;}
     // Selection and the eventual hover treatment share the logical hit geometry.
@@ -339,7 +341,7 @@ void Window::PaintTile(ID2D1DeviceContext *c, Tile const &tile, D2D1_RECT_F r, i
             auto box=cover.Corner();plate(box);float cx=(box.left+box.right)/2,cy=(box.top+box.bottom)/2,half=cover.tile*.18f;
             p.Icon(L"add",{cx-half,cy-half,cx+half,cy+half},p.theme.Ink());
         }
-        if(!renaming||renameKey!=tile.key||folderId==tile.folder)p.Text(tile.name+L" ("+std::to_wstring(tile.items.size())+L")",NameBounds(tile,r,false,unit),std::max(8.5f,11*unit),p.theme.Ink(),400,DWRITE_TEXT_ALIGNMENT_CENTER);
+        if(!renaming||renameKey!=tile.key||folderId==tile.folder)p.Text(tile.name+(tile.showItemCount?L" ("+std::to_wstring(tile.items.size())+L")":L""),NameBounds(tile,r,false,unit),std::max(8.5f,11*unit),p.theme.Ink(),400,DWRITE_TEXT_ALIGNMENT_CENTER);
     }else{
         float cx=(r.left+r.right)/2,cy=r.top+(!inFolder?(r.bottom-r.top-20*unit)/2:std::min(34.f,std::max(10.f,(r.bottom-r.top-19)/2)));
         float size=inFolder?std::min(44.f,std::max(16.f,r.bottom-r.top-22)):44*unit;drawIcon(tile,{cx-size/2,cy-size/2,cx+size/2,cy+size/2});
@@ -364,8 +366,11 @@ void Window::PaintDesktopName(ID2D1DeviceContext *c,Tile const &tile,D2D1_RECT_F
     label->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,line,font*.95f);
     DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER,0,0};com_ptr<IDWriteInlineObject> ellipsis;
     check_hresult(app.graphics.text->CreateEllipsisTrimmingSign(format,ellipsis.put()));label->SetTrimming(&trim,ellipsis.get());
-    for(auto offset:{D2D1_POINT_2F{-1,0},D2D1_POINT_2F{1,0},D2D1_POINT_2F{0,-1},D2D1_POINT_2F{0,1}})
-        c->DrawTextLayout({bounds.left+offset.x,bounds.top+offset.y},label.get(),p.Color(D2D1::ColorF(light?0x000000:0xffffff,.9f)),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    // Keep the contrast edge one physical pixel at mixed DPI. Four almost
+    // opaque 1-DIP copies previously became a heavy 1.5/2px outline at 150/200%.
+    float edge=96/std::max(48.f,dpi);
+    for(auto offset:{D2D1_POINT_2F{-edge,0},D2D1_POINT_2F{edge,0},D2D1_POINT_2F{0,-edge},D2D1_POINT_2F{0,edge}})
+        c->DrawTextLayout({bounds.left+offset.x,bounds.top+offset.y},label.get(),p.Color(D2D1::ColorF(light?0x000000:0xffffff,.65f)),D2D1_DRAW_TEXT_OPTIONS_CLIP);
     c->DrawTextLayout({bounds.left,bounds.top},label.get(),p.Color(D2D1::ColorF(light?0xffffff:0x000000)),D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
 }
@@ -380,7 +385,12 @@ void Window::SyncDesktopName(std::wstring const &requested,bool withinDraw){
         ClearDesktopName();return;
     }
     auto tileRect=RootBounds(key);auto r=NameBounds(*tile,tileRect,false,RootUnit());r.left-=1;r.top-=1;r.right+=1;r.bottom+=1;
-    float scale=dpi/96;int w=std::max(1,static_cast<int>(std::ceil((r.right-r.left)*scale))),h=std::max(1,static_cast<int>(std::ceil((r.bottom-r.top)*scale)));
+    float scale=dpi/96;
+    // The cached text surface must land on whole output pixels; otherwise the
+    // compositor resamples already antialiased glyphs a second time.
+    r.left=std::floor(r.left*scale)/scale;r.top=std::floor(r.top*scale)/scale;
+    r.right=std::ceil(r.right*scale)/scale;r.bottom=std::ceil(r.bottom*scale)/scale;
+    int w=std::max(1,static_cast<int>(std::lround((r.right-r.left)*scale))),h=std::max(1,static_cast<int>(std::lround((r.bottom-r.top)*scale)));
     size_t bytes=static_cast<size_t>(w)*h*4;
     if(bytes>512*1024){ClearDesktopName();return;}
     auto stamp=key+L"|"+tile->name+L"|"+std::to_wstring(dpi)+L"|"+std::to_wstring(Preview70Theme::revision)+L"|"+std::to_wstring(r.left)+L"|"+std::to_wstring(r.top)+L"|"+std::to_wstring(w)+L"|"+std::to_wstring(h);
@@ -756,18 +766,11 @@ void Window::ReceiveIcons(JsonObject const &result)
         check_hresult(frame->GetSize(&w, &h));
         if (!w || !h || w > 512 || h > 512)
             continue;
+        auto raster=NativeIconRaster(app.graphics.wic.get(),frame.get(),w,h);
         size_t allocation = static_cast<size_t>(w) * h * 4;
-        while (!icons.empty() && (icons.size() >= 128 || iconBytes + allocation > IconLimit))
-        {
-            auto oldest = std::min_element(icons.begin(), icons.end(), [](auto const &a, auto const &b) {
-                return a.second.age < b.second.age;
-            });
-            iconBytes -= oldest->second.bytes;
-            icons.erase(oldest);
-        }
         com_ptr<IWICFormatConverter> converter;
         check_hresult(app.graphics.wic->CreateFormatConverter(converter.put()));
-        check_hresult(converter->Initialize(frame.get(), GUID_WICPixelFormat32bppPBGRA,
+        check_hresult(converter->Initialize(raster.get(), GUID_WICPixelFormat32bppPBGRA,
                                             WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom));
         com_ptr<ID2D1DeviceContext> c;
         check_hresult(app.graphics.d2d->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, c.put()));
@@ -776,8 +779,13 @@ void Window::ReceiveIcons(JsonObject const &result)
         icon.bytes = allocation;
         icon.age = ++iconAge;
         auto previous = icons.find(key);
-        if (previous != icons.end())
-            iconBytes -= previous->second.bytes;
+        if (previous != icons.end()){
+            iconBytes -= previous->second.bytes;icons.erase(previous);
+        }
+        while (!icons.empty() && (icons.size() >= NativeIconEntries || iconBytes + allocation > IconLimit)){
+            auto oldest=std::min_element(icons.begin(),icons.end(),[](auto const &a,auto const &b){return a.second.age<b.second.age;});
+            iconBytes-=oldest->second.bytes;icons.erase(oldest);
+        }
         icons[key] = std::move(icon);
         if(folderMorph)folderMorph->RefreshIcon(*this,key);
         iconBytes += allocation;
@@ -1823,9 +1831,9 @@ LRESULT Window::Message(UINT m, WPARAM w, LPARAM l)
         }
         break;
     case WM_SETFOCUS:
-        // Keep the Explorer-owned group together. Preserving the owner's Z order
-        // here can place our transparent surface behind the native desktop.
-        if(app.model.desktopRuntime)SetWindowPos(hwnd,HWND_BOTTOM,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        // The event-driven desktop guard owns depth policy. Unconditionally
+        // lowering on focus undoes Windows Show Desktop for borderless games.
+        // Explicit external-app launch handoffs still lower the owned group.
         NotifyFocus();return 0;
     case WM_SYSKEYDOWN:
         if(w==VK_RETURN&&(GetKeyState(VK_MENU)&0x8000)){app.inputEpoch++;Key(VK_RETURN);return 0;}
@@ -1897,16 +1905,6 @@ LRESULT Window::Message(UINT m, WPARAM w, LPARAM l)
         if(HandoffPointer(WM_LBUTTONUP,GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi))return 0;
         if(MediaPointer(WM_LBUTTONUP,GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi))return 0;
         if(marquee){marquee=false;MarqueePreview();marqueeBase.clear();if(GetCapture()==hwnd)ReleaseCapture();NotifySelection();return 0;}
-        if(pressed&&!dragging&&folderId.empty()&&!(GetKeyState(VK_CONTROL)&0x8000)&&!(GetKeyState(VK_SHIFT)&0x8000)){
-            auto cover=Find(pressedKey);if(cover&&!cover->folder.empty()){
-                auto layout=CoverLayout(*cover,RootBounds(cover->key));int count=static_cast<int>(cover->items.size());
-                int down=layout.HitMain(pressedPoint.x*96/dpi,pressedPoint.y*96/dpi,count),up=layout.HitMain(GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi,count);
-                if(down>=0&&up==down){JsonObject request;Put(request,L"op",std::wstring(L"open"));Put(request,L"board",boardId);Put(request,L"folder",cover->folder);Put(request,L"key",cover->items[up].key);
-                    pressed=false;renameClick=false;if(GetCapture()==hwnd)ReleaseCapture();
-                    if(app.model.desktopRuntime){AllowSetForegroundWindow(app.parent);SetWindowPos(hwnd,HWND_BOTTOM,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}app.Request(request);return 0;
-                }
-            }
-        }
         if(pressed&&!dragging&&renameClick&&Hit(GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi)==pressedKey){renameClickKey=pressedKey;SetTimer(hwnd,98,GetDoubleClickTime(),nullptr);}renameClick=false;
         if(pressed&&!dragging&&app.model.components){
             auto tile=Find(pressedKey);
@@ -1923,8 +1921,13 @@ LRESULT Window::Message(UINT m, WPARAM w, LPARAM l)
                     float tw=static_cast<float>(Num(tile->card,L"columns",4))*96-8,zoom=(rect.right-rect.left)/tw;int index=NativeServiceHit(*this,*tile,(GET_X_LPARAM(l)*96/dpi-rect.left)/zoom,(GET_Y_LPARAM(l)*96/dpi-rect.top)/zoom,tw);
                     if(index==-2||index==-3)HonorPage(*tile,index==-2?-1:1);else if(index>=0)CardAction(tile->key,L"honor-open",index);
                 }
+                else if(Str(tile->card,L"type")==L"system.weather"&&Hit(GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi)==pressedKey){
+                    float tw=static_cast<float>(Num(tile->card,L"columns",2))*96-8,th=static_cast<float>(Num(tile->card,L"rows",2))*96-8;
+                    float zoom=std::min((rect.right-rect.left)/tw,(rect.bottom-rect.top)/th);
+                    NativeWeatherTurn(*this,*tile,NativeWeatherHours::Hit((GET_X_LPARAM(l)*96/dpi-rect.left)/zoom,(GET_Y_LPARAM(l)*96/dpi-rect.top)/zoom,tw,th),tw,th);
+                }
                 else if(Str(tile->card,L"type")==L"system.clipboard-image")CardAction(tile->key,L"image-copy");
-                else if(Str(tile->card,L"type")==L"system.storage"&&x>=14&&x<=128&&y>=153&&y<=176)CardAction(tile->key,L"cleanup");
+                else if(Str(tile->card,L"type")==L"system.storage"&&app.model.honorSignedIn&&x>=14&&x<=128&&y>=153&&y<=176)CardAction(tile->key,L"cleanup");
                 else if(Str(tile->card,L"type")==L"system.todo"||Str(tile->card,L"type")==L"system.week"){
                     float tw=static_cast<float>(Num(tile->card,L"columns",4))*96-8,th=static_cast<float>(Num(tile->card,L"rows",2))*96-8;
                     float zoom=std::min((rect.right-rect.left)/tw,(rect.bottom-rect.top)/th);
@@ -1980,7 +1983,13 @@ LRESULT Window::Message(UINT m, WPARAM w, LPARAM l)
         KillTimer(hwnd,98);renameClickKey.clear();renameClick=false;
         CancelBenchmark();
         auto key=Hit(GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi);auto cover=Find(key);
-        if(folderId.empty()&&cover&&!cover->folder.empty()&&CoverLayout(*cover,RootBounds(key)).HitMain(GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi,static_cast<int>(cover->items.size()))>=0)return 0;
+        if(folderId.empty()&&cover&&!cover->folder.empty()){
+            int child=CoverLayout(*cover,RootBounds(key)).HitMain(GET_X_LPARAM(l)*96/dpi,GET_Y_LPARAM(l)*96/dpi,static_cast<int>(cover->items.size()));
+            if(child>=0){JsonObject request;Put(request,L"op",std::wstring(L"open"));Put(request,L"board",boardId);Put(request,L"folder",cover->folder);Put(request,L"key",cover->items[child].key);
+                pressed=false;if(GetCapture()==hwnd)ReleaseCapture();
+                if(app.model.desktopRuntime){AllowSetForegroundWindow(app.parent);SetWindowPos(hwnd,HWND_BOTTOM,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}app.Request(request);return 0;
+            }
+        }
         Activate(key);
         return 0;
     }
@@ -2092,6 +2101,7 @@ void App::Recover()
 {
     if(NativeRenderScope::busy){deviceRecoveryPending=true;QueueRenderWork();return;}
     deviceRecoveryPending=false;
+    if(shell&&shell->captionClose)shell->captionClose->Reset();
     if(recovery)recovery->Close();recovery.reset();
     honor.Clear();
     if(menus)menus->Close();
@@ -2144,6 +2154,7 @@ void App::Packet(std::string const &bytes)
     if(Str(p,L"type")==L"recovery-view"){if(recovery&&recovery->hwnd)recovery->Set(p.GetNamedObject(L"data"));return;}
     if(Str(p,L"type")==L"resource-probe"){
         JsonObject data;JsonObject packets;for(auto const &[kind,count]:packetCounts)Put(packets,kind.c_str(),static_cast<double>(count));data.Insert(L"packetCounts",packets);Put(data,L"waitWakes",static_cast<double>(waitWakes));JsonObject counts;for(auto const &[id,count]:messageCounts)Put(counts,std::to_wstring(id).c_str(),static_cast<double>(count));data.Insert(L"messageCounts",counts);auto epoch=p.TryLookup(L"expectedInputEpoch");bool interrupted=epoch&&epoch.ValueType()==JsonValueType::Number&&static_cast<long long>(epoch.GetNumber())!=inputEpoch;
+        Put(data,L"popupTrayReorderBytes",static_cast<double>(popup&&popup->trayDrag?popup->trayDrag->bytes:0));
         if(!interrupted){auto action=Str(p,L"action");if(action==L"open-folder"||action==L"close-folder")for(auto const &window:windows)if(window->boardId==Str(p,L"board")){if(action==L"open-folder"){auto board=model.Find(window->boardId);if(board)for(auto const &tile:board->tiles)if(tile.folder==Str(p,L"folder")){window->OpenFolder(tile.key);break;}}else window->CloseFolder();break;}}
         if(!interrupted&&shell){auto action=Str(p,L"action");if(action==L"hide-dock-preview")shell->HidePreview();else if(action==L"show-dock-preview"){bool shown=false;for(auto const &[id,bar]:shell->bars){if(!bar->dock)continue;for(int i=0;i<static_cast<int>(bar->entries.size());i++)if(bar->entries[i].HasKey(L"windows")&&bar->entries[i].GetNamedArray(L"windows").Size()){bar->Reveal();shell->ShowPreview(*bar,i);shown=true;break;}if(shown)break;}}else if(action==L"show-flyout"&&!shell->bars.empty()){auto snapshot=shell->bars.begin()->second->data;shell->Toast(snapshot,L"音量",Num(snapshot,L"volume",0));}}
         Put(data,L"previewThumbnails",shell&&shell->preview?static_cast<double>(shell->preview->taskThumbnails.size()):0);Put(data,L"previewNominalBytes",shell&&shell->preview?static_cast<double>(shell->preview->surfaceBytes):0);data.Insert(L"flyoutVisible",JsonValue::CreateBooleanValue(shell&&shell->toast&&shell->toast->visible));Put(data,L"flyoutResizeBytes",shell&&shell->toast?static_cast<double>(shell->toast->FlyoutResizeBytes()):0);Put(data,L"flyoutSurfaceBytes",shell&&shell->toast?static_cast<double>(shell->toast->surfaceBytes):0);
@@ -2218,7 +2229,7 @@ void App::Packet(std::string const &bytes)
     if (snapshot && snapshot.ValueType() == JsonValueType::Object && model.AcceptsSnapshot(snapshot.GetObject()))
     {
         auto previousHonor=model.honorData?std::wstring(model.honorData.Stringify()):L"";auto previousHandoff=std::wstring(model.handoffData.Stringify());
-        auto previousScheme=HonorScheme(model.preferences);bool previousRecycleFull=model.recycleFull;
+        auto previousScheme=HonorScheme(model.preferences);bool previousRecycleFull=model.recycleFull,previousHonorSignedIn=model.honorSignedIn;auto previousIconIdentity=model.iconIdentityVersion;
         auto previousPreferences=model.preferences?std::wstring(model.preferences.Stringify()):L"";
         auto previousWorkspace=model.workspaceVersion,previousCatalog=model.cardCatalogVersion;int previousRecovery=model.recoveryCount;
         model.Read(snapshot.GetObject());
@@ -2228,7 +2239,8 @@ void App::Packet(std::string const &bytes)
         if(previousPreferences!=(model.preferences?std::wstring(model.preferences.Stringify()):L"")){
             RefreshRenderPolicy();
         }
-        if(previousCatalog!=model.cardCatalogVersion)for(auto const &window:windows)window->desktopStamp.valid=false;
+        if(previousCatalog!=model.cardCatalogVersion||previousIconIdentity!=model.iconIdentityVersion||previousHonorSignedIn!=model.honorSignedIn)for(auto const &window:windows){window->desktopStamp.valid=false;window->panelStamp.valid=false;}
+        if(previousScheme!=HonorScheme(model.preferences)&&popup&&popup->visible)popup->Draw();
         bool wasStarted=started;
         StartWindows();
         if(started&&pendingShellData){auto pending=pendingShellData;pendingShellData=nullptr;Packet(to_string(pending.Stringify()));}
@@ -2242,12 +2254,13 @@ void App::Packet(std::string const &bytes)
         }
         for (auto const &w : windows){
             w->Apply();
+            if(previousHonorSignedIn!=model.honorSignedIn){w->DrawCards(true,L"system.storage");w->DrawCards(true,L"system.honor-service");}
             if(previousHonor!=(model.honorData?std::wstring(model.honorData.Stringify()):L""))w->DrawCards(true,L"system.honor-service");
             if(previousHandoff!=std::wstring(model.handoffData.Stringify()))w->DrawCards(true,L"system.handoff");
         }
         TrimNativeHandoffImages(*this);
         if(!model.honorData||!model.honorData.GetNamedArray(L"items",JsonArray{}).Size()){honorServiceIcons.clear();honorServicePng.clear();}
-        for(auto const &window:windows){std::erase_if(window->honorServicePages,[&](auto const &v){return !window->Find(v.first);});std::erase_if(window->honorServiceFocus,[&](auto const &v){return !window->Find(v.first);});std::erase_if(window->todoScrolls,[&](auto const &v){return !window->Find(v.first);});std::erase_if(window->todoSelectedDays,[&](auto const &v){return !window->Find(v.first);});}
+        for(auto const &window:windows){std::erase_if(window->honorServicePages,[&](auto const &v){return !window->Find(v.first);});std::erase_if(window->honorServiceFocus,[&](auto const &v){return !window->Find(v.first);});std::erase_if(window->todoScrolls,[&](auto const &v){return !window->Find(v.first);});std::erase_if(window->todoSelectedDays,[&](auto const &v){return !window->Find(v.first);});std::erase_if(window->weatherHourPages,[&](auto const &v){return !window->Find(v.first);});}
         if(shell)for(auto const &[id,bar]:shell->bars)if(!bar->dock||previousScheme!=HonorScheme(model.preferences)||previousRecycleFull!=model.recycleFull){bar->Layout();bar->Draw();}
     }
     if (p.HasKey(L"ok") && !Bool(p, L"ok") && !Bool(p,L"background"))
@@ -2530,9 +2543,15 @@ int CheckFolderGeometry()
 #include "../../tools/review/native-clock-notify-check.h"
 #include "../../tools/review/native-nov07-toolbar-checks.h"
 #include "../../tools/review/native-music-names-checks.h"
+#include "../../tools/review/native-nov08-feature-checks.h"
+#include "../../tools/review/native-nov09-details-checks.h"
+#include "../../tools/review/native-nov08-bug-checks.h"
+#include "../../tools/review/native-music-sources-checks.h"
+#include "../../tools/review/native-settings-ui-checks.h"
 #include "../../tools/review/native-ole-feedback-checks.h"
 #include "../../tools/review/native-context-motion-checks.h"
 #include "../../tools/review/native-desktop-more-checks.h"
+#include "../../tools/review/native-dock-menu-checks.h"
 #include "../../tools/review/native-card-dependency-checks.h"
 #include "../../tools/review/native-grid-motion-checks.h"
 #include "../../tools/review/native-center-panel-checks.h"
@@ -2544,6 +2563,9 @@ int CheckFolderGeometry()
 #include "../../tools/review/native-ui-batch-checks.h"
 #include "../../tools/review/native-dock-followup-checks.h"
 #include "../../tools/review/native-oct29-followup-checks.h"
+#include "../../tools/review/native-nov10-ui-checks.h"
+#include "../../tools/review/native-close-fixture-checks.h"
+#include "../../tools/review/native-tray-motion-checks.h"
 #include "native-transition.h"
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
@@ -2562,6 +2584,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     {
         int count = 0;
         auto args = CommandLineToArgvW(GetCommandLineW(), &count);
+        if(count==2&&std::wstring(args[1])==L"--nov10-close-fixture"){LocalFree(args);return Nov10CloseFixture::Target();}
+        if(count==3&&std::wstring(args[1])==L"--nov10-close-checks"){std::wstring output=args[2];LocalFree(args);try{return Nov10CloseFixture::Check(output);}catch(std::exception const &e){std::ofstream file(std::filesystem::path(output)/L"error.txt");file<<e.what();throw;}catch(hresult_error const &e){std::ofstream file(std::filesystem::path(output)/L"error.txt");file<<std::hex<<static_cast<unsigned>(e.code())<<" "<<to_string(e.message());throw;}}
+        if(count==3&&std::wstring(args[1])==L"--nov10-ui-checks"){std::wstring output=args[2];LocalFree(args);try{return CheckNov10Ui(output);}catch(hresult_error const &e){std::ofstream file(std::filesystem::path(output)/L"error.txt");file<<std::hex<<static_cast<unsigned>(e.code())<<" "<<to_string(e.message());throw;}}
         if (count == 2 && std::wstring(args[1]) == L"--check-geometry")
         {
             LocalFree(args);
@@ -2579,6 +2604,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         if(count==3&&std::wstring(args[1])==L"--context-motion-checks"){std::wstring output=args[2];LocalFree(args);return CheckContextMotion(output);}
         if(count==3&&std::wstring(args[1])==L"--apps-input-checks"){std::wstring output=args[2];LocalFree(args);return CheckAppsInputFixture(output);}
         if(count==4&&std::wstring(args[1])==L"--desktop-more-checks"){std::wstring replies=args[2],output=args[3];LocalFree(args);return CheckDesktopMore(replies,output);}
+        if(count==3&&std::wstring(args[1])==L"--dock-menu-checks"){std::wstring output=args[2];LocalFree(args);return CheckDockMenus(output);}
         if(count==4&&std::wstring(args[1])==L"--card-dependency-checks"){std::wstring catalog=args[2],output=args[3];LocalFree(args);
             try{return CheckCardDependencies(catalog,output);}catch(winrt::hresult_error const &e){std::ofstream log{std::filesystem::path(output+L"/failure.txt")};log<<winrt::to_string(e.message());throw;}catch(std::exception const &e){std::ofstream log{std::filesystem::path(output+L"/failure.txt")};log<<e.what();throw;}}
         if(count==3&&std::wstring(args[1])==L"--contour-motion-checks"){std::wstring output=args[2];LocalFree(args);return CheckContourMotion(output);}
@@ -2591,8 +2617,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         if(count==3&&std::wstring(args[1])==L"--v040-acceptance-checks"){std::wstring output=args[2];LocalFree(args);return CheckV040Acceptance(output);}
         if(count==3&&std::wstring(args[1])==L"--nov04-feature-checks"){std::wstring output=args[2];LocalFree(args);return CheckNov04Features(output);}
         if(count==3&&std::wstring(args[1])==L"--clock-notify-check"){std::wstring output=args[2];LocalFree(args);return CheckNativeClockNotify(output);}
+        if(count==3&&std::wstring(args[1])==L"--tray-motion-checks"){std::wstring output=args[2];LocalFree(args);try{return CheckTrayMotion(output);}catch(winrt::hresult_error const&e){std::ofstream f(std::filesystem::path(output)/L"error.txt");f<<std::hex<<e.code().value<<" "<<to_string(e.message());return 1;}catch(std::exception const&e){std::ofstream f(std::filesystem::path(output)/L"error.txt");f<<e.what();return 1;}}
+        if(count==3&&std::wstring(args[1])==L"--settings-ui-checks"){std::wstring output=args[2];LocalFree(args);try{return CheckSettingsUi(output);}catch(winrt::hresult_error const&e){std::ofstream f(std::filesystem::path(output)/L"error.txt");f<<std::hex<<e.code().value<<" "<<to_string(e.message());return 1;}catch(std::exception const&e){std::ofstream f(std::filesystem::path(output)/L"error.txt");f<<e.what();return 1;}}
+        if(count==3&&(std::wstring(args[1])==L"--music-sources-checks"||std::wstring(args[1])==L"--toolbar-contrast-sampling")){std::wstring command=args[1],output=args[2];LocalFree(args);
+            try{return command==L"--music-sources-checks"?CheckMusicSources(output):CheckToolbarContrastSampling(output);}catch(winrt::hresult_error const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<std::hex<<static_cast<unsigned long>(e.code().value)<<" "<<to_string(e.message());return 1;}
+            catch(std::exception const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<e.what();return 1;}}
         if(count==3&&std::wstring(args[1])==L"--music-names-checks"){std::wstring output=args[2];LocalFree(args);
             try{return CheckMusicNames(output);}catch(winrt::hresult_error const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<std::hex<<static_cast<unsigned long>(e.code().value)<<" "<<to_string(e.message());throw;}
+            catch(std::exception const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<e.what();throw;}}
+        if(count==3&&std::wstring(args[1])==L"--nov09-details-checks"){std::wstring output=args[2];LocalFree(args);
+            try{return CheckNov09Details(output);}catch(winrt::hresult_error const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<std::hex<<static_cast<unsigned long>(e.code().value)<<" "<<to_string(e.message());return 2;}
+            catch(std::exception const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<e.what();return 2;}}
+        if(count==3&&std::wstring(args[1])==L"--nov08-feature-checks"){std::wstring output=args[2];LocalFree(args);return CheckNov08Features(output);}
+        if(count==3&&std::wstring(args[1])==L"--nov08-bug-checks"){std::wstring output=args[2];LocalFree(args);
+            try{return CheckNov08Bugs(output);}catch(winrt::hresult_error const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<std::hex<<static_cast<unsigned long>(e.code().value)<<" "<<to_string(e.message());throw;}
             catch(std::exception const &e){std::ofstream file(std::filesystem::path(output)/L"native-error.txt");file<<e.what();throw;}}
         if(count==3&&std::wstring(args[1])==L"--nov07-toolbar-checks"){std::wstring output=args[2];LocalFree(args);return CheckNov07Toolbar(output);}
         if(count==3&&std::wstring(args[1])==L"--ole-feedback-checks"){std::wstring output=args[2];LocalFree(args);return CheckOleReleaseFeedback(output);}

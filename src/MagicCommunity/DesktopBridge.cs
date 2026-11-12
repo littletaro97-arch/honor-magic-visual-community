@@ -108,9 +108,13 @@ public sealed class DesktopBridge : IDisposable
     internal long NativeWorkspaceVersion=>workspaceRevision;
     internal long NativeCardCatalogVersion=>cardCatalogVersion;
     internal IReadOnlyList<DesktopCardDefinition> NativeCardDefinitions=>cardCatalog.Types;
+    private IReadOnlyList<DesktopCardDefinition> VisibleCardDefinitions=>HonorPcManager.ServicesVisible?cardCatalog.Types:cardCatalog.Types.Where(d=>d.Type!="system.honor-service").ToArray();
     internal string? NativeIcon(DesktopItem item)=>icons.Get(item);
     internal string? NativePanelIcon(DesktopItem item)=>icons.Get(item,true);
     internal string? NativeApplicationIcon(ApplicationIconSource source)=>icons.GetApplication(source);
+    internal string NativeApplicationIdentity(ApplicationIconSource source)=>icons.ApplicationIdentity(source);
+    internal long NativeIconIdentityVersion=>icons.IdentityVersion;
+    internal string NativeDesktopIdentity(DesktopItem item)=>icons.DesktopIdentity(item);
     internal void NativeInvalidateApplicationIcon(string identity)=>icons.InvalidateApplication(identity);
     internal void NativeOpenSettings()=>showSettings();
     internal System.Net.Http.HttpClient NativeClient()
@@ -591,7 +595,9 @@ public sealed class DesktopBridge : IDisposable
         {
             string monitor=String(body,"monitorId");
             if(nativeLease is null||HasLostTakeover||!monitorBoards.ContainsKey(monitor)||!widgetWindows.TryGetValue(monitor,out var own))throw new InvalidDataException();
-            bool focused=NativeDesktopHost.ConfirmKeyboardAtDesktopDepth(own,controller.Root);
+            // A focus acknowledgement must not undo Windows Show Desktop.
+            // The guard repairs accidental inversions on foreground/reveal events.
+            bool focused=NativeDesktopHost.IsKeyboardForeground(own,controller.Root);
             controller.Log("desktop_keyboard_focus",new{monitorId=monitor,focused});return(200,new{focused});
         }
         if (method == "GET" && uri.AbsolutePath == "/health") return (200, new { ok = true, sessionId, version = AppController.Version,nativeDesktopReady=NativePopupReady,streamClients=Volatile.Read(ref eventStreamClients),streamNotifications=Interlocked.Read(ref eventStreamNotifications),streamHeartbeats=Interlocked.Read(ref eventStreamHeartbeats),gridStateReads=Interlocked.Read(ref gridStateReads) });
@@ -634,15 +640,15 @@ public sealed class DesktopBridge : IDisposable
             return(200,new{version=AppController.Version,sessionId,revision=controller.State.Revision,changeVersion=changes.Version,workspaceRevision,nativeVersion=nativeDesktop.Revision,readOnly=controller.Store.ReadOnly,boardName=board.Name,mode="unified-desktop",takeoverActive=nativeLease is not null,hiddenFolders=hidden,
                 projection=new{originX=projection.OriginX/scale,originY=projection.OriginY/scale,stepX=projection.StepX/scale,stepY=projection.StepY/scale,inset=UnifiedDesktopGrid.Inset},nativeIcons=native.Icons.Select(icon=>new{left=(icon.Left-display.X)/scale,top=(icon.Top-display.Y)/scale,right=(icon.Right-display.X)/scale,bottom=(icon.Bottom-display.Y)/scale}).ToArray(),
                 collectionProblem=controller.Collections.Problem,snapshot=new{items=visibleItems.Select(item=>new{id=Id(item),name=item.Name,renameName=item.IsVirtual?null:Path.GetFileName(item.Target),icon=icons.Get(item),isFolder=item.IsFolder,isVirtual=item.IsVirtual,isRecycleBin=DesktopFileDrop.IsRecycleBin(item),managed=controller.Collections.IsManaged(item.Target)}).ToArray(),boards=controller.State.Boards.Select(b=>new{id=b.Id,name=b.Name,active=controller.Screens.Any(s=>s.Id==b.Id)}).ToArray()},
-                cardApiVersion=DesktopCardCatalog.ApiVersion,cardCatalogVersion,cardDefinitions=cardCatalog.Types,
+                cardApiVersion=DesktopCardCatalog.ApiVersion,cardCatalogVersion,honorServices=HonorPcManager.ServicesVisible,cardDefinitions=VisibleCardDefinitions,
                 board=new{boardId=board.Id,paged=board.Paged,pageId=board.ActivePageId,pages=board.Pages?.Select(page=>new{id=page.Id,count=page.Grid.Placements.Count}).ToArray(),unplaced=board.Unplaced.Keys.Select(key=>new{key,name=UnplacedName(key)}).ToArray(),columns=board.Grid.Columns,rows=board.Grid.Rows,knownIds=all.Select(Id).ToArray(),rootIds=board.RootItems.Where(item=>board.Grid.Placements.ContainsKey(DesktopGridActions.ItemKey(item))).Select(Id).ToArray(),folders=board.Boxes.Where(box=>board.Grid.Placements.ContainsKey(DesktopGridActions.FolderKey(box))).Select(box=>new{id=box.Id,name=box.Name,itemIds=box.Items.Select(Id).ToArray()}).ToArray(),cards=DesktopCards.Items(board).Where(card=>board.Grid.Placements.ContainsKey(DesktopCards.Key(card))).Select(card=>new{id=card.Id,type=card.Type,columns=card.Columns,rows=card.Rows,settings=card.Settings}).ToArray(),placements=board.Grid.Placements.ToDictionary(row=>row.Key,row=>new{x=row.Value.X,y=row.Value.Y,w=row.Value.W,h=row.Value.H})}});
         }
-        if(method=="GET"&&uri.AbsolutePath=="/desktop-cards/catalog")return(200,new{apiVersion=DesktopCardCatalog.ApiVersion,types=cardCatalog.Types});
+        if(method=="GET"&&uri.AbsolutePath=="/desktop-cards/catalog")return(200,new{apiVersion=DesktopCardCatalog.ApiVersion,types=VisibleCardDefinitions});
         if(method=="POST"&&uri.AbsolutePath=="/desktop-cards/manage")
         {
             string monitor=String(body,"monitorId"),kind=String(body,"kind");
             if(nativeLease is null||HasLostTakeover||!monitorBoards.ContainsKey(monitor))throw new LayoutEditException("桌面尚未就绪。");
-            if(kind=="list"){RefreshCardCatalog();return(200,new{revision=controller.State.Revision,types=cardCatalog.Types.Select(value=>new{definition=value,instances=CustomCardLibrary.InstanceCount(controller.State,value.Type)}).ToArray()});}
+            if(kind=="list"){RefreshCardCatalog();return(200,new{revision=controller.State.Revision,types=VisibleCardDefinitions.Select(value=>new{definition=value,instances=CustomCardLibrary.InstanceCount(controller.State,value.Type)}).ToArray()});}
             if(kind=="open-directory"){customCards.CheckRoot();Directory.CreateDirectory(customCards.Root);CustomCardShortcut.OpenPath(customCards.Root);return(200,new{ok=true});}
             if(kind=="open-dependency"){
                 // Resolve the trusted catalog entry here, never a renderer-supplied URL.
@@ -676,6 +682,7 @@ public sealed class DesktopBridge : IDisposable
             controller.Commit(state=>
             {
                 var board=state.Boards.Single(row=>row.Id==boardId);
+                if(kind=="create"&&String(body,"type")=="system.honor-service")HonorPcManager.RequireSignedIn();
                 if(kind=="create")addedId=DesktopCards.Add(state,board,cardCatalog,String(body,"type"),body.GetProperty("columns").GetInt32(),body.GetProperty("rows").GetInt32(),body.GetProperty("settings"),Position("x"),Position("y")).Id;
                 else if(kind=="configure")DesktopCards.Configure(board,String(body,"id"),body.GetProperty("settings"));
                 else if(kind=="resize")DesktopCards.Resize(board,cardCatalog,String(body,"id"),body.GetProperty("columns").GetInt32(),body.GetProperty("rows").GetInt32());
@@ -791,6 +798,7 @@ public sealed class DesktopBridge : IDisposable
                     }finally{board.ActivePageId=previousPage;}
                 }
                 else if(kind=="group-reference")DesktopGroupBridgeActions.Reference(state,board,board,body.GetProperty("itemIds").EnumerateArray().Select(value=>"item:"+value.GetString()).ToArray(),"item:"+String(body,"itemId"),Optional("sourceFolder"),Optional("destinationFolder"),body.GetProperty("x").GetInt32(),body.GetProperty("y").GetInt32());
+                else if(kind=="folder-count")DesktopGridActions.SetFolderCount(board,String(body,"folderId"),body.GetProperty("show").GetBoolean());
                 else if(kind=="dissolve")DesktopGridActions.Dissolve(board,String(body,"folderId"));
                 else if(kind=="place")DesktopGridActions.Place(board,String(body,"tileId"),body.GetProperty("x").GetInt32(),body.GetProperty("y").GetInt32());
                 else if(kind=="resize")DesktopGridActions.Resize(board,String(body,"folderId"),body.GetProperty("columns").GetInt32(),body.GetProperty("rows").GetInt32());

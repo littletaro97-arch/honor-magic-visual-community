@@ -40,10 +40,14 @@ inline void NativePopup::BuildFlyout(){
     flyoutBody={26,60,width-26,60+bodyHeight};flyoutScroll=std::clamp(flyoutScroll,0.f,std::max(0.f,flyoutFullHeight-bodyHeight));
     auto add=[&](std::wstring id,std::wstring label,D2D1_RECT_F r,std::wstring control=L"button",double value=0){PopupRow row;row.key=row.id=id;row.action=id;row.label=label;row.rect=r;row.enabled=true;row.control=control;row.value=value;rows.push_back(row);};
     add(L"flyout-close",L"关闭",{width-52,18,width-22,46});
+    if(Bool(data,L"openSource")){
+        add(L"flyout-source-title",L"打开通知来源",{26,18,width-60,48},L"notification-body");
+        if(bodyHeight>0)add(L"flyout-source-body",L"打开通知来源",flyoutBody,L"notification-body");
+    }
     float y=flyoutBody.bottom+(body.empty()?0:8);
     if(flyoutOverflow){add(L"flyout-fold",flyoutExpanded?L"收起":L"展开全文",{26,y,width-26,y+28});y+=32;}
     if(Num(data,L"value",-1)>=0){add(L"flyout-level",Str(data,L"levelLabel"),{26,y,width-26,y+46},L"range",Num(data,L"value"));y+=52;}
-    if(Bool(data,L"canOpen")){add(L"flyout-open",L"打开完整面板",{26,y,width-26,y+28});y+=32;}
+    if(Bool(data,L"canOpen")&&!Bool(data,L"openSource")){add(L"flyout-open",L"打开完整面板",{26,y,width-26,y+28});y+=32;}
     height=std::max(100.f,y+18);
 }
 inline void NativePopup::ResizeFlyout(bool animate){
@@ -56,7 +60,7 @@ inline void NativePopup::ResizeFlyout(bool animate){
     BuildFlyout();float scale=dpi/96;auto payload=packet.GetNamedObject(L"payload"),pos=payload.GetNamedObject(L"desiredPosition");
     POINT anchor{static_cast<LONG>(Num(pos,L"x")),static_cast<LONG>(Num(pos,L"y"))};MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromPoint(anchor,MONITOR_DEFAULTTONEAREST),&monitor);
     int w=static_cast<int>(std::ceil(width*scale)),h=static_cast<int>(std::ceil(height*scale));
-    int x=std::clamp(anchor.x-w/2,monitor.rcWork.left,std::max(monitor.rcWork.left,monitor.rcWork.right-w)),y=std::clamp(anchor.y,monitor.rcWork.top,std::max(monitor.rcWork.top,monitor.rcWork.bottom-h));
+    auto origin=NativeHintPlacement::Origin(payload,monitor.rcWork,w,h);int x=origin.x,y=origin.y;
     NativeLayerPosition(hwnd,x,y,w,h,SWP_NOACTIVATE);
     if(popupRoot)popupRoot.Size({static_cast<float>(w),static_cast<float>(h)});if(popupScene)popupScene.Size({static_cast<float>(w),static_cast<float>(h)});
     auto region=CreateRoundRectRgn(0,0,w+1,h+1,static_cast<int>(56*scale),static_cast<int>(56*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);
@@ -86,6 +90,7 @@ inline void NativePopup::PaintFlyout(ID2D1DeviceContext *c){
         else{c->PushAxisAlignedClip(flyoutBody,D2D1_ANTIALIAS_MODE_ALIASED);auto r=flyoutBody;r.top-=flyoutScroll;r.bottom=r.top+flyoutFullHeight;com_ptr<IDWriteTextLayout> layout;check_hresult(app.graphics.text->CreateTextLayout(text.c_str(),static_cast<UINT32>(text.size()),app.graphics.Format(13,false),r.right-r.left,flyoutFullHeight,layout.put()));layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,20,15);c->DrawTextLayout({r.left,r.top},layout.get(),p.Color(p.theme.Ink()),D2D1_DRAW_TEXT_OPTIONS_CLIP);c->PopAxisAlignedClip();}
     }
     for(auto const &row:rows){
+        if(row.control==L"notification-body")continue;
         if(row.id==L"flyout-close"){p.Icon(L"close",{row.rect.left+8,row.rect.top+8,row.rect.right-8,row.rect.bottom-8},p.theme.Muted());continue;}
         if(row.control==L"range"){auto track=RangeTrack(row);p.Slider(track,row.value);continue;}
         p.Text(row.label,row.rect,12,p.theme.Accent(),500);
@@ -130,5 +135,5 @@ inline bool NativePopup::FlyoutPointer(UINT message,WPARAM w,LPARAM l){
 inline void NativePopup::ActivateFlyout(PopupRow const &row){
     if(row.id==L"flyout-close"){Hide(false);return;}
     if(row.id==L"flyout-fold"){flyoutExpanded=!flyoutExpanded;flyoutScroll=0;ResizeFlyout(true);if(hwnd)SetTimer(hwnd,84,flyoutExpanded?9000:4200,nullptr);return;}
-    if(row.id==L"flyout-open"){auto action=passiveClick;Hide(false);if(action)action();return;}
+    if(row.id==L"flyout-open"||row.control==L"notification-body"){auto action=passiveClick;Hide(false);if(action)action();return;}
 }

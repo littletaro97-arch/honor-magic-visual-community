@@ -21,7 +21,7 @@ try{
  if($LASTEXITCODE -ne 0){Get-Content (Join-Path $out tray-build.log) -Tail 24;throw 'Tray capture build failed.'}
  & (Join-Path $msvc bin/Hostx64/x64/cl.exe) /nologo /std:c++20 /EHsc /O2 /MT /W4 /DUNICODE /D_UNICODE (Join-Path $root src/taskbar-guard/taskbar-guard.cpp) /Fo:taskbar-guard.obj /Fe:MagicTaskbarGuard.exe /link /SUBSYSTEM:CONSOLE /DYNAMICBASE /NXCOMPAT user32.lib shell32.lib *> (Join-Path $out guard-build.log)
  if($LASTEXITCODE -ne 0){Get-Content (Join-Path $out guard-build.log) -Tail 24;throw 'Taskbar guard build failed.'}
- & (Join-Path $msvc bin/Hostx64/x64/cl.exe) /nologo /std:c++20 /EHsc /O2 /MT /W4 /utf-8 /DUNICODE /D_UNICODE (Join-Path $root src/notification-permission/notification-permission.cpp) /Fo:notification-permission.obj /Fe:MagicNotificationPermission.exe /link /SUBSYSTEM:WINDOWS /DYNAMICBASE /NXCOMPAT user32.lib gdi32.lib shell32.lib windowsapp.lib CoreMessaging.lib *> (Join-Path $out permission-build.log)
+ & (Join-Path $msvc bin/Hostx64/x64/cl.exe) /nologo /std:c++20 /EHsc /O2 /MT /W4 /utf-8 /DUNICODE /D_UNICODE (Join-Path $root src/notification-permission/notification-permission.cpp) /Fo:notification-permission.obj /Fe:MagicNotificationPermission.exe /link /SUBSYSTEM:WINDOWS /DYNAMICBASE /NXCOMPAT user32.lib gdi32.lib shell32.lib windowsapp.lib CoreMessaging.lib dwmapi.lib d2d1.lib dwrite.lib advapi32.lib comctl32.lib *> (Join-Path $out permission-build.log)
  if($LASTEXITCODE -ne 0){Get-Content (Join-Path $out permission-build.log) -Tail 24;throw 'Notification permission build failed.'}
  Copy-Item -LiteralPath (Join-Path $root 'assets/community/application.ico') -Destination (Join-Path $out 'application.ico')
  [IO.File]::WriteAllText((Join-Path $out 'application.rc'),'1 ICON "application.ico"',[Text.UTF8Encoding]::new($false))
@@ -32,6 +32,10 @@ try{
  & (Join-Path $msvc bin/Hostx64/x64/cl.exe) /nologo /std:c++20 /EHsc /O2 /MT /W4 /utf-8 /DUNICODE /D_UNICODE ("/FI"+$familyHeader) (Join-Path $root src/window-action-helper/window-action-helper.cpp) /Fo:window-action-helper.obj /Fe:MagicWindowAction.exe /link /MANIFESTUAC:NO /SUBSYSTEM:WINDOWS /DYNAMICBASE /NXCOMPAT /MANIFEST:EMBED ("/MANIFESTINPUT:"+(Join-Path $root src/window-action-helper/app.manifest)) windowsapp.lib user32.lib advapi32.lib shell32.lib ole32.lib uuid.lib *> (Join-Path $out window-helper-build.log)
  if($LASTEXITCODE -ne 0){Get-Content (Join-Path $out window-helper-build.log) -Tail 30;throw 'Window action helper build failed.'}
  if($Checks){
+ & (Join-Path $msvc bin/Hostx64/x64/cl.exe) /nologo /std:c++20 /EHsc /O2 /MT /W4 /utf-8 /DUNICODE /D_UNICODE (Join-Path $root tools/review/notification-permission-appearance-check.cpp) /Fo:permission-check.obj /Fe:permission-check.exe /link /SUBSYSTEM:CONSOLE windowsapp.lib user32.lib gdi32.lib dwmapi.lib d2d1.lib dwrite.lib advapi32.lib comctl32.lib ole32.lib windowscodecs.lib *> (Join-Path $out permission-check-build.log)
+ if($LASTEXITCODE -ne 0){Get-Content (Join-Path $out permission-check-build.log) -Tail 15;throw 'Permission appearance check build failed.'}
+ & (Join-Path $out permission-check.exe) $out
+ if($LASTEXITCODE -ne 0){throw 'Permission appearance checks failed.'}
  & (Join-Path $msvc bin/Hostx64/x64/cl.exe) /nologo /std:c++20 /EHsc /O2 /MT /W4 /utf-8 /DUNICODE /D_UNICODE (Join-Path $root tools/review/window-helper-checks.cpp) /Fo:window-helper-checks.obj /Fe:window-helper-checks.exe /link /SUBSYSTEM:CONSOLE windowsapp.lib user32.lib advapi32.lib shell32.lib ole32.lib uuid.lib *> (Join-Path $out checks-build.log)
  if($LASTEXITCODE -ne 0){Get-Content (Join-Path $out checks-build.log) -Tail 20;throw 'Window helper checks build failed.'}
  & (Join-Path $out window-helper-checks.exe) *> (Join-Path $out checks.json)

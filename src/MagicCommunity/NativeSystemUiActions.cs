@@ -19,6 +19,11 @@ internal sealed partial class NativeSystemUiSession
         var args = JsonSerializer.SerializeToElement(action.Arguments);
         switch (action.Local)
         {
+            case "music-pin": case "music-reorder":
+                string destination=Text(result,"destination");
+                if(action.Local=="music-reorder"&&!destination.StartsWith("music-source:",StringComparison.Ordinal))break;
+                music.Change(Text(args,"sessionId"),action.Local=="music-pin"?null:destination[13..]);
+                QueueExtensionProjection();break;
             case "notification-quiet":
                 bool quiet=args.GetProperty("enabled").GetBoolean();
                 NativeNotificationPreferences.Save(deployment.DataDirectory,quiet);
@@ -38,11 +43,13 @@ internal sealed partial class NativeSystemUiSession
                 var themePanel=NativeSystemPanel.Build("@magic/quick-settings",presentation.State,notificationQuiet:notificationQuiet,displayView:true);themePanel.Data["hostPid"]=Environment.ProcessId;
                 lock(currentGate){if(currentToken!=token)break;currentPanel=themePanel;}
                 await popups.Update(JsonSerializer.SerializeToElement(new{token,data=themePanel.Data}),stop.Token);break;
-            case "honor-power": OpenUri(HonorPcManager.Find() ?? throw new InvalidOperationException("未找到荣耀电脑管家。")); break;
+            case "honor-power": HonorPcManager.RequireSignedIn(); OpenUri(HonorPcManager.Find() ?? throw new InvalidOperationException("未找到荣耀电脑管家。")); break;
             case "tray":
                 int button = (int)Number(result, "button");
-                if (button is 4 or 5) { await TrayPreference(args, result); break; }
-                await popups.Close(stop.Token); GetCursorPos(out var point); await TrayAction(Text(args, "iconId"), button == 2 ? "context" : button == 3 ? "double-click" : button == 1 ? "middle" : "activate", point.X, point.Y); break;
+                if (button is 4 or 5) { await TrayPreference(args, result, token); break; }
+                // The native tray stays open across activation and double clicks.
+                // Capture coordinates at the gesture, not after an async dispatch.
+                GetCursorPos(out var point); await TrayAction(Text(args, "iconId"), button == 2 ? "context" : button == 3 ? "double-click" : button == 1 ? "middle" : "activate", result.TryGetProperty("x",out _)?Number(result,"x"):point.X, result.TryGetProperty("y",out _)?Number(result,"y"):point.Y); break;
             case "open-application": await popups.Close(stop.Token); await OpenNotificationApplication(Text(args,"aumid")); break;
             case "notifications-authorize": await AuthorizeNotifications(); break;
             case "bluetooth-refresh": bluetoothDetails.Invalidate(); bluetoothDetails.Show(token); break;
@@ -67,7 +74,15 @@ internal sealed partial class NativeSystemUiSession
         if (aumid.Length is < 1 or > 512 || aumid.Contains('"') || aumid.Contains('\0')) throw new InvalidDataException("Application identity differs.");
         var start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe")) { UseShellExecute = false }; start.ArgumentList.Add("shell:AppsFolder\\" + aumid); Process.Start(start)?.Dispose();
     }
+    private readonly SemaphoreSlim applicationActivation = new(1,1);
     private async Task OpenNotificationApplication(string aumid)
+    {
+        // Repeated clicks must not toggle a tray-owned window open and closed.
+        if(!await applicationActivation.WaitAsync(0,stop.Token))return;
+        try { await OpenNotificationApplicationCore(aumid); }
+        finally { applicationActivation.Release(); }
+    }
+    private async Task OpenNotificationApplicationCore(string aumid)
     {
         var state=presentation.State;
         var resolved=Array(state.Providers.GetValueOrDefault("launches"),"items").ToDictionary(item=>Text(item,"id"),item=>Text(item,"target"));
@@ -77,29 +92,89 @@ internal sealed partial class NativeSystemUiSession
                 if(Text(item,"aumid").Equals(aumid,StringComparison.OrdinalIgnoreCase))targets.Add(resolved.GetValueOrDefault(Text(item,"id"),Text(Object(item,"launch"),"executable",Text(item,"target"))));
         targets.AddRange(applicationEntries.Where(entry=>entry.Aumid.Equals(aumid,StringComparison.OrdinalIgnoreCase)).Select(entry=>entry.Target));
         var snapshot=await backend.Request("snapshot",new{},stop.Token);
-        await notificationWindows.Open(aumid,snapshot,targets,window=>PerformWindowAction(JsonSerializer.SerializeToElement(new{nativeWindowId=Text(window,"id"),hwnd=long.Parse(Text(window,"hwnd"),System.Globalization.CultureInfo.InvariantCulture)}),"activate"),OpenApplication,NativeNotificationWindows.WindowAppId,()=>ActivateResidentQq(targets));
+        string launchId = aumid;
+        if (notificationWindows.Find(aumid,snapshot,targets,NativeNotificationWindows.WindowAppId).ValueKind != JsonValueKind.Object)
+        {
+            // A tray-resident app is already installed and running. Resolve its
+            // live instance before an AppsFolder lookup can fail or launch it.
+            if(NativeNotificationWindows.CanRestoreResident(aumid,targets)&&await ActivateResidentApplication(aumid,targets))return;
+            var registered = await RegisteredApplication.ResolveAsync(aumid, stop.Token);
+            launchId = registered.Aumid;
+            if (registered.Executable.Length > 0) targets.Add(registered.Executable);
+        }
+        await notificationWindows.Open(aumid,snapshot,targets,window=>PerformWindowAction(JsonSerializer.SerializeToElement(new{nativeWindowId=Text(window,"id"),hwnd=long.Parse(Text(window,"hwnd"),System.Globalization.CultureInfo.InvariantCulture)}),"activate"),_=>OpenApplication(launchId),NativeNotificationWindows.WindowAppId,()=>ActivateResidentApplication(aumid,targets));
     }
-    private async Task<bool> ActivateResidentQq(IEnumerable<string> targets)
+    private async Task<bool> ActivateResidentApplication(string appId,IEnumerable<string> targets)
     {
-        using var current=Process.GetCurrentProcess();
-        var processes=Process.GetProcessesByName("QQ");
+        var paths=NativeNotificationWindows.ResidentPaths(targets);
+        // Process existence alone does not imply a tray-resident application:
+        // Explorer, for example, owns the desktop even with no folder open.
+        // Use the captured tray identity, whose PID/creation time is rechecked
+        // by TrayAction, rather than blocking every background process.
+        var tray=await backend.Request("tray-read",new{},stop.Token);
+        var ids=NativeNotificationWindows.ResidentTrayIds(appId,tray,paths);
+        if(ids.Length==0){
+            // Preserve the existing QQ guard when capture has not seen its
+            // icon yet. The generic path above is based on real tray identity;
+            // process existence is not a universal single-instance contract.
+            if(NativeNotificationWindows.IsQq(appId,paths)&&QqProcessRunning())
+                throw new InvalidOperationException("QQ 正在运行。请从系统托盘打开对应的 QQ 账号。");
+            return false;
+        }
+        string? id=ids.Length==1?ids[0]:null;
+        if(id is not null){
+            var snapshot=await backend.Request("snapshot",new{},stop.Token);
+            var existing=notificationWindows.Find(appId,snapshot,paths,NativeNotificationWindows.WindowAppId);
+            if(existing.ValueKind==JsonValueKind.Object){
+                await PerformWindowAction(JsonSerializer.SerializeToElement(new{nativeWindowId=Text(existing,"id"),hwnd=long.Parse(Text(existing,"hwnd"),System.Globalization.CultureInfo.InvariantCulture)}),"activate");
+                return true;
+            }
+            GetCursorPos(out var point);
+            var target=await NativeNotificationWindows.RestoreTrayWindow(
+                action=>TrayAction(id,action,point.X,point.Y),
+                ()=>notificationWindows.WaitForWindow(appId,paths,
+                    ()=>backend.Request("snapshot",new{},stop.Token),
+                    ms=>Task.Delay(ms,stop.Token),NativeNotificationWindows.WindowAppId));
+            if(target.ValueKind==JsonValueKind.Object){
+                await PerformWindowAction(JsonSerializer.SerializeToElement(new{nativeWindowId=Text(target,"id"),hwnd=long.Parse(Text(target,"hwnd"),System.Globalization.CultureInfo.InvariantCulture)}),"activate");
+                return true;
+            }
+            log("notification_resident_window_missing",new{application=appId});
+        }
+        throw new InvalidOperationException("应用正在运行。请从系统托盘打开对应的已有窗口。");
+    }
+    private static bool QqProcessRunning()
+    {
+        using var current=Process.GetCurrentProcess();var processes=Process.GetProcessesByName("QQ");
         try{
-            bool running=false;
             foreach(var process in processes){
-                try{if(process.SessionId==current.SessionId){running=true;break;}}
+                try{if(process.SessionId==current.SessionId)return true;}
                 catch(InvalidOperationException){/* Process exited during the snapshot. */}
             }
-            if(!running)return false;
+            return false;
         }finally{foreach(var process in processes)process.Dispose();}
-        // A resident QQNT often has no task window. Activating its registered
-        // AppsFolder entry in this state starts a second sign-in window.
-        var tray=await backend.Request("tray-read",new{},stop.Token);
-        string? id=NativeNotificationWindows.QqTrayIcon(tray,targets);
-        if(id is not null){
-            GetCursorPos(out var point);
-            if(await TrayAction(id,"double-click",point.X,point.Y))return true;
-        }
-        throw new InvalidOperationException("QQ 正在运行。请从系统托盘打开对应的 QQ 账号。");
+    }
+    private async Task OpenDockApplication(JsonElement item)
+    {
+        string appId=Text(item,"umid",Text(item,"aumid"));
+        string[] targets=[Text(Object(item,"nativeLaunch"),"executable"),Text(item,"iconExecutable"),Text(item,"path",Text(item,"target"))];
+        var launch=Object(item,"nativeLaunch");
+        // File/folder links and explicit arguments retain their launch intent
+        // (e.g. an Explorer location or a browser profile). A background process
+        // without a matching tray icon is not evidence of a resident instance.
+        var arguments=launch.ValueKind==JsonValueKind.Object&&launch.TryGetProperty("arguments",out var args)?args:default;
+        if(!NativeNotificationWindows.ResidentDockLaunch(Text(launch,"executable",Text(item,"path",Text(item,"target"))),arguments)||!NativeNotificationWindows.CanRestoreResident(appId,targets)){Launch(item,false);return;}
+        // Dock and notification clicks share the in-flight guard, so two entry
+        // points cannot toggle a tray window twice or race a cold launch.
+        if(!await applicationActivation.WaitAsync(0,stop.Token))return;
+        try{
+            if(!await ActivateResidentApplication(appId,targets))Launch(item,false);
+        }finally{applicationActivation.Release();}
+    }
+    private async Task DispatchDockApplication(JsonElement item)
+    {
+        try{await OpenDockApplication(item);}
+        catch(Exception error)when(error is not OutOfMemoryException){await Notice(error);}
     }
     private static void Launch(JsonElement item, bool administrator)
     {
@@ -108,16 +183,20 @@ internal sealed partial class NativeSystemUiSession
         if (!Path.IsPathFullyQualified(target) || target.StartsWith(@"\\", StringComparison.Ordinal) || (!File.Exists(target) && !Directory.Exists(target))) throw new FileNotFoundException("程序或文件已移动。", target);
         var start = new ProcessStartInfo(target) { UseShellExecute = true }; if (administrator) start.Verb = "runas";
         string working = Text(launch, "workingDirectory"); if (working.Length > 0 && Directory.Exists(working)) start.WorkingDirectory = working;
+        else if(Path.GetExtension(target).Equals(".exe",StringComparison.OrdinalIgnoreCase))start.WorkingDirectory=Path.GetDirectoryName(target)!;
         if (launch.ValueKind == JsonValueKind.Object && launch.TryGetProperty("arguments", out var arguments)) { if (arguments.ValueKind == JsonValueKind.Array) foreach (var argument in arguments.EnumerateArray()) start.ArgumentList.Add(argument.GetString() ?? ""); else if (arguments.ValueKind == JsonValueKind.String) start.Arguments = arguments.GetString() ?? ""; }
         Process.Start(start)?.Dispose();
     }
     private async Task ApplicationCommand(JsonElement item, string verb)
     {
-        if (verb is "launch" or "new-instance") { Launch(item, false); return; }
+        if (verb == "launch") { _=DispatchDockApplication(item); return; }
+        if (verb == "new-instance") { Launch(item, false); return; }
         if (verb is "runas" or "run-as") { Launch(item, true); return; }
         if (verb == "open-location")
         {
-            string path = Text(item, "path"); if (!Path.IsPathFullyQualified(path)) throw new InvalidOperationException("此应用没有可打开的本地位置。");
+            string path = Text(item, "location", Text(item, "path")); if (!Path.IsPathFullyQualified(path)) throw new InvalidOperationException("此应用没有可打开的本地位置。");
+            if (!File.Exists(path) && !Directory.Exists(path)) throw new FileNotFoundException("应用所在位置已变化，请重新打开开始菜单。", path);
+            await popups.Close(stop.Token);
             var start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe")) { UseShellExecute = false }; start.ArgumentList.Add("/select,"); start.ArgumentList.Add(path); Process.Start(start)?.Dispose(); return;
         }
         if (verb == "edit-icon") { await EditIcon(Text(item, "id")); return; }

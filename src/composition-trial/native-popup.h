@@ -1,12 +1,15 @@
 #pragma once
 #include "native-appearance.h"
+#include "native-toggle-motion.h"
 #include "native-tooltip-layout.h"
 #include "native-popup-placement.h"
+#include "native-hint-placement.h"
 #include "native-context-motion.h"
 #include "native-marquee.h"
 #include "native-preview-motion.h"
 #include "native-toolbar-assets.h"
 #include "native-tray-menu-anchor.h"
+#include "native-outside-pointer.h"
 #include "native-official-panels.h"
 #include <dwmapi.h>
 struct NativePopup;
@@ -24,6 +27,7 @@ struct PopupRow
     std::wstring control;
     double value = 0;
 };
+#include "native-tray-order.h"
 // One event-driven popup shared by the calendar, input selector and user menu.
 // Hidden popups own no drawing surface or timer. Graphics/fonts share App.
 struct NativePopup
@@ -42,10 +46,22 @@ struct NativePopup
     int visibleRows = 8, hover = -1,pressedTray=-1;
     float appearanceOverflow=0,appearanceTop=0,appearanceView=0,appearanceOffset=0;
     POINT trayPress{};bool trayDragging=false;
+    NativeOutsidePointer trayOutside;
+    static constexpr UINT TrayOutsideMessage=WM_APP+147;
+    std::shared_ptr<NativeTrayDrag> trayDrag;
+    void PaintTrayItem(ID2D1DeviceContext*,PopupRow const&,D2D1_RECT_F,bool);
+    D2D1_RECT_F TrayItemRect(int index)const;
+    bool TrayOwnsPixels()const{return trayDrag&&trayDrag->layer;}
+    void MoveTrayDrag(float x,float y);
+    void SyncTrayDrag();
+    void EndTrayDrag(bool commit);
+    void ResetTrayDrag();
+    void FinishTrayFeedback();
+    bool DeferTrayUpdate(JsonObject const&);
     Preview70Icons appearanceIcons;
     NativeTooltipLayout tooltipLayout;
     std::set<std::wstring> iconRequests;
-    std::map<std::wstring,std::wstring> imageSources;
+    std::map<std::wstring,std::wstring> imageSources,resolvedExecutables;
     void RequestAppearanceIcons();
     float CalendarHeight()const{
         using namespace std::chrono;if(yearMode)return 82+4*58.f+68;
@@ -126,9 +142,10 @@ struct NativePopup
             if(!hwnd||!SetTimer(hwnd,89,NativeContextMotion::RootMs+16,nullptr))ResetPanelMotion();return;
         }
         if(Flyout()){
-            ResetPanelMotion(false);auto &c=app.graphics.compositor;popupRoot.CenterPoint({width*dpi/192,0,0});
-            if(close){NativeInteractionMotion::Vector(c,popupRoot,L"Scale",{.93f,.93f,1},NativeInteractionMotion::CloseMs);NativeInteractionMotion::Vector(c,popupRoot,L"Offset",{0,-12*dpi/96,0},NativeInteractionMotion::CloseMs);NativeInteractionMotion::Opacity(c,popupRoot,0,NativeInteractionMotion::CloseMs);}
-            else{opening=true;popupRoot.Scale({.62f,.62f,1});popupRoot.Offset({0,-14*dpi/96,0});popupRoot.Opacity(0);auto spring=NativeInteractionMotion::DockSpringVector(c,{.62f,.62f,1},{1,1,1});spring.Duration(std::chrono::milliseconds(520));popupRoot.StartAnimation(L"Scale",spring);auto offset=NativeInteractionMotion::DockSpringVector(c,{0,-14*dpi/96,0},{0,0,0});offset.Duration(std::chrono::milliseconds(520));popupRoot.StartAnimation(L"Offset",offset);NativeInteractionMotion::Opacity(c,popupRoot,1,220);SetTimer(hwnd,89,536,nullptr);}return;
+            ResetPanelMotion(false);auto &c=app.graphics.compositor;auto pose=NativeHintPlacement::Motion(packet.GetNamedObject(L"payload",JsonObject{}),width,height);float unit=dpi/96;
+            popupRoot.CenterPoint({(contentX+pose.x)*unit,(contentY+pose.y)*unit,0});
+            if(close){NativeInteractionMotion::Vector(c,popupRoot,L"Scale",{.93f,.93f,1},NativeInteractionMotion::CloseMs);NativeInteractionMotion::Vector(c,popupRoot,L"Offset",{0,pose.exitY*unit,0},NativeInteractionMotion::CloseMs);NativeInteractionMotion::Opacity(c,popupRoot,0,NativeInteractionMotion::CloseMs);}
+            else{opening=true;popupRoot.Scale({.62f,.62f,1});popupRoot.Offset({0,pose.enterY*unit,0});popupRoot.Opacity(0);auto spring=NativeInteractionMotion::DockSpringVector(c,{.62f,.62f,1},{1,1,1});spring.Duration(std::chrono::milliseconds(520));popupRoot.StartAnimation(L"Scale",spring);auto offset=NativeInteractionMotion::DockSpringVector(c,{0,pose.enterY*unit,0},{0,0,0});offset.Duration(std::chrono::milliseconds(520));popupRoot.StartAnimation(L"Offset",offset);NativeInteractionMotion::Opacity(c,popupRoot,1,220);if(!SetTimer(hwnd,89,536,nullptr))ResetPanelMotion();}return;
         }
         bool picker=LocalPicker();auto payload=packet.GetNamedObject(L"payload");bool above=PanelAbove();
         auto pose=NativeInteractionMotion::Panel(width,height,picker,above,1,Modal());float factor=pose.scale,shift=pose.offset.y*dpi/96;
@@ -182,6 +199,8 @@ struct NativePopup
     bool LocalContext()const{return kind==L"@magic/context-menu";}
     std::function<void(std::wstring const &)> contextAction;
     std::function<void()> contextDismiss;
+    static constexpr UINT ContextOutsideMessage=WM_APP+146;
+    std::function<void(uint64_t)> contextOutside;
     std::function<void(std::wstring const &)> contextHover,contextPrepare;
     std::function<void()> contextBack;
     std::function<bool(HWND)> contextFamily;
@@ -208,13 +227,52 @@ struct NativePopup
     bool contextDragging=false,contextScrollbarHover=false;
     float ContextRowHeight(JsonObject const &row)const{return Str(row,L"control")==L"separator"?9.f:(Str(Data(),L"menuStyle")==L"shell"||Str(Data(),L"menuStyle")==L"toolbar")?40.f:32.f;}
     void BuildContextRows();void PaintContext(ID2D1DeviceContext *c);
+    RECT ContextWorkArea(RECT work)const{
+        auto payload=packet.GetNamedObject(L"payload");
+        return NativeContextMotion::ExcludeBar(work,Str(payload,L"contextBarSide"),static_cast<int>(Num(payload,L"contextBarBoundary")),dpi/96);
+    }
+    float ContextPreferredWidth(){
+        auto data=Data();auto style=Str(data,L"menuStyle");float preferred=style==L"shell"?240:300;
+        if(style==L"toolbar"){
+            preferred=200;
+            for(auto const &v:data.GetNamedArray(L"rows")){auto label=Str(v.GetObject(),L"label");com_ptr<IDWriteTextLayout> layout;
+                check_hresult(app.graphics.text->CreateTextLayout(label.c_str(),static_cast<UINT32>(label.size()),app.graphics.Format(12.8f,false,600),4096,100,layout.put()));
+                DWRITE_TEXT_METRICS metrics{};layout->GetMetrics(&metrics);preferred=std::max(preferred,metrics.widthIncludingTrailingWhitespace+80);}
+        }return preferred;
+    }
+    RECT ContextBounds(POINT anchor,RECT work){
+        auto payload=packet.GetNamedObject(L"payload");float scale=dpi/96;
+        int pw=static_cast<int>(std::ceil(width*scale)),ph=static_cast<int>(std::ceil(height*scale));
+        auto offset=[](std::wstring const &align,int size){return align==L"Center"?size/2:align==L"End"?size:0;};
+        int x=anchor.x-offset(Str(payload,L"alignX"),pw),y=anchor.y-offset(Str(payload,L"alignY"),ph);
+        contextChild=Num(payload,L"contextDepth")>0;contextFlipped=Bool(payload,L"contextFlipped");
+        if(contextChild&&payload.HasKey(L"contextParentLeft")){
+            auto side=NativeContextMotion::ChildX(static_cast<int>(Num(payload,L"contextParentLeft")),static_cast<int>(Num(payload,L"contextParentRight")),pw,work,scale);
+            anchor.x=x=side.x;contextFlipped=side.flipped;payload.Insert(L"contextFlipped",JsonValue::CreateBooleanValue(side.flipped));
+        }
+        x=std::clamp(x,static_cast<int>(work.left),std::max(static_cast<int>(work.left),static_cast<int>(work.right)-pw));
+        y=std::clamp(y,static_cast<int>(work.top),std::max(static_cast<int>(work.top),static_cast<int>(work.bottom)-ph));
+        contentX=contentY=0;
+        if(AnimatedContext()){
+            auto placement=NativeContextMotion::Place(anchor,work,pw,ph,scale,contextChild,contextFlipped,static_cast<float>(Num(payload,L"contextAnchorY",anchor.y+22*scale)));
+            if(!DesktopContext()&&!contextChild)contextOrigin={std::clamp((anchor.x-x)/scale,4.f,std::max(4.f,width-4)),std::clamp((anchor.y-y)/scale,4.f,std::max(4.f,height-4))};
+            else{x=placement.x;y=placement.y;contextOrigin=placement.origin;}
+            contentX=NativeContextMotion::Gutter(width);contentY=NativeContextMotion::Gutter(height);
+            x-=static_cast<int>(contentX*scale);y-=static_cast<int>(contentY*scale);pw+=static_cast<int>(2*contentX*scale);ph+=static_cast<int>(2*contentY*scale);
+        }
+        return {x,y,x+pw,y+ph};
+    }
     void SetContextRows(JsonArray const &values){
         Data().Insert(L"rows",values);scroll=0;focus=-1;hover=-1;contextScroll=0;
-        if(hwnd){RECT rect{};GetWindowRect(hwnd,&rect);MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);float scale=dpi/96;
-            LayoutContext((monitor.rcWork.right-monitor.rcWork.left)/scale-12,(monitor.rcWork.bottom-monitor.rcWork.top)/scale-12,contextColumnWidth>0?contextColumnWidth:width);visibleRows=std::max(1,static_cast<int>((height-20)/32));
-            int pw=static_cast<int>(std::ceil(width*scale)),ph=static_cast<int>(std::ceil(height*scale));int y=std::clamp(rect.top,monitor.rcWork.top+4,std::max(monitor.rcWork.top+4,monitor.rcWork.bottom-ph-4));
-            int x=std::clamp(rect.left,monitor.rcWork.left+4,std::max(monitor.rcWork.left+4,monitor.rcWork.right-pw-4));
-            NativeLayerPosition(hwnd,x,y,pw,ph,SWP_NOACTIVATE);auto region=CreateRoundRectRgn(0,0,pw+1,ph+1,static_cast<int>(2*NativeMetrics::FloatingRadius*scale),static_cast<int>(2*NativeMetrics::FloatingRadius*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);Release();
+        if(hwnd){auto position=packet.GetNamedObject(L"payload").GetNamedObject(L"desiredPosition");POINT anchor{static_cast<LONG>(Num(position,L"x")),static_cast<LONG>(Num(position,L"y"))};
+            MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromPoint(anchor,MONITOR_DEFAULTTONEAREST),&monitor);float scale=dpi/96;auto work=ContextWorkArea(monitor.rcWork);
+            LayoutContext((work.right-work.left)/scale-12,(work.bottom-work.top)/scale-12,ContextPreferredWidth());
+            auto bounds=ContextBounds(anchor,work);int pw=bounds.right-bounds.left,ph=bounds.bottom-bounds.top;
+            NativeLayerPosition(hwnd,bounds.left,bounds.top,pw,ph,SWP_NOACTIVATE);
+            if(AnimatedContext())SetWindowRgn(hwnd,nullptr,FALSE);
+            else{auto region=CreateRoundRectRgn(0,0,pw+1,ph+1,static_cast<int>(2*MaterialRadius()*scale),static_cast<int>(2*MaterialRadius()*scale));if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);}
+            popupRoot.Size({static_cast<float>(pw),static_cast<float>(ph)});popupScene.Size({static_cast<float>(pw),static_cast<float>(ph)});
+            visual.Offset({contentX*scale,contentY*scale,0});ResetPanelMotion();Release();
         }BuildRows();Draw();
     }
     JsonObject PickerDefinition()const;
@@ -223,6 +281,9 @@ struct NativePopup
     bool DisplayView()const{return packet&&Bool(Data(),L"nativeDisplayView");}
     bool CenterPanel()const{return kind==L"@magic/notifications"||kind==L"@magic/quick-settings"&&!PowerView()&&!DisplayView();}
     bool FunctionalPanel()const{return kind==L"@magic/quick-settings"||kind==L"@magic/network-popup"||kind==L"@magic/bluetooth-popup"||kind==L"@magic/media-popup"||kind==L"@magic/notifications";}
+    bool MusicView()const{return packet&&kind==L"@magic/media-popup"&&Bool(Data(),L"nativeMusicView");}
+    std::wstring musicPress,musicDropTarget;float2 musicPressPoint{};bool musicDragging=false;
+    void LayoutMusicPanel();void PaintMusicPanel(ID2D1DeviceContext *);bool MusicPointer(UINT,WPARAM,LPARAM);void MusicReorder(std::wstring const &,std::wstring const &);
     bool quickDevices=false,audioAdvanced=false,resizeDisclosure=false;
     void RelayoutDisclosure();
     void LayoutCenterPanel();void PaintCenterPanel(ID2D1DeviceContext *);
@@ -230,7 +291,7 @@ struct NativePopup
     JsonObject resizePending{nullptr};bool resizePreparing=false,resizePainting=false,resizeInputsBlocked=false,resizeImmediate=false;
     bool TryResizeUpdate(JsonObject const &);void FinishResize(bool redraw=true,bool flush=true,bool animatePending=false);size_t ResizeBytes()const;
     float FunctionalHeight(RECT const &work,float unit)const{
-        bool tray=kind==L"@magic/system-tray";float minimum=tray?130.f:220.f,content=tray?70+std::ceil(rows.size()/5.f)*56:functionalExtent+((kind==L"@magic/bluetooth-popup"||kind==L"@magic/network-popup")?18:66);
+        bool tray=kind==L"@magic/system-tray";float minimum=tray?130.f:MusicView()?164.f:220.f,content=tray?70+std::ceil(rows.size()/5.f)*56:functionalExtent+((MusicView()||kind==L"@magic/bluetooth-popup"||kind==L"@magic/network-popup")?18:66);
         float next=std::min(std::max(minimum,content),(work.bottom-work.top)/unit-20);next=std::min(next,(8*1024*1024.f)/(width*unit*unit*4)*.998f);
         float limit=NativeGlassHeightLimit(width,unit,MaterialTier());return limit>=minimum?std::min(next,limit):next;
     }
@@ -243,6 +304,7 @@ struct NativePopup
     D2D1_RECT_F RangeTrack(PopupRow const &row)const{auto r=row.rect;if(kind==L"@magic/media-popup"&&row.id.starts_with(L"volume:")&&row.id!=L"volume:microphone")return {r.left+46,r.top+6,r.right-16,r.bottom-6};bool compact=!Flyout()&&(kind==L"@magic/media-popup"||kind==L"@magic/quick-settings"&&!PowerView()&&!DisplayView());return {r.left+(compact?52:12),r.bottom-34,r.right-(compact?54:12),r.bottom-6};}
     float ContentTop()const{return kind==L"@magic/quick-settings"&&!PowerView()&&!DisplayView()?14.f:kind==L"@magic/apps-menu"?18.f:54.f;}
     void LayoutPreview70();
+    float UserMenuHeight()const{float bottom=106;for(auto const &row:rows)bottom=std::max(bottom,row.rect.bottom);return bottom+18;}
     void PaintPreview70(ID2D1DeviceContext *c);
     long long shows = 0, hides = 0, redraws = 0;
     size_t surfaceBytes = 0;
@@ -293,6 +355,15 @@ struct NativePopup
     bool materialPreview=false;
     NativeGlassSheet glassSheet;
     NativeHoverVisual interactionVisual;D2D1_POINT_2F interactionPoint{};
+    std::map<std::wstring,NativeToggleVisual> toggleVisuals;
+    void PaintToggle(NativePaint &paint,PopupRow const &row,D2D1_RECT_F rect,bool header=false){
+        if(!popupRoot||!visible){paint.Toggle(rect,row.value>.5,row.enabled);return;}
+        auto viewport=D2D1::RectF(14,header?0:ContentTop(),width-14,height-16);
+        if(FunctionalPanel()&&!functionalPinned.contains(row.id))viewport={14,functionalTop,width-14,functionalBottom};
+        rect.left+=contentX;rect.right+=contentX;rect.top+=contentY;rect.bottom+=contentY;
+        viewport.left+=contentX;viewport.right+=contentX;viewport.top+=contentY;viewport.bottom+=contentY;
+        toggleVisuals[row.id].Sync(app.graphics.compositor,popupRoot,rect,viewport,dpi/96,row.value>.5,row.enabled,NativeMotion(app.model),Preview70Theme{dark});
+    }
     bool Glass()const{return !NativeLowPower(app.model)&&(materialVisual||glassSheet.root||materialPreview);}
     NativeMaterial MaterialTier()const{return LocalContext()||LocalTooltip()||Flyout()||ToolbarDropdown()||kind==L"@magic/power-menu"?NativeMaterial::Menu:NativeMaterial::Panel;}
     float MaterialRadius()const{return Flyout()?28.f:LocalTooltip()||LocalDockPreview()||LocalContext()&&Str(Data(),L"menuStyle")==L"toolbar"?10.f:NativeMetrics::FloatingRadius;}
@@ -305,13 +376,14 @@ struct NativePopup
     }
     virtual ~NativePopup()
     {
-        contextAction={};contextDismiss={};contextFamily={};contextIcon={};contextPrepare={};
+        contextAction={};contextDismiss={};contextOutside={};contextFamily={};contextIcon={};contextPrepare={};
         if(life)life->owner=nullptr;
         DestroyHost();
         if(inputFont)DeleteObject(inputFont);
         if(inputBackground)DeleteObject(inputBackground);
     }
     void DestroyHost(){
+        trayOutside.Stop();
         if(!hwnd)return;auto old=hwnd;WTSUnRegisterSessionNotification(old);SetWindowLongPtrW(old,GWLP_USERDATA,0);
         Release();CloseInputs();if(tooltip){DestroyWindow(tooltip);tooltip=nullptr;}NativeGlassStates().erase(old);
         if(target){try{target.Root(nullptr);}catch(...){}}target=nullptr;visual=nullptr;popupRoot=nullptr;popupScene=nullptr;shade=nullptr;
@@ -351,6 +423,7 @@ struct NativePopup
         Put(detail, L"hides", static_cast<double>(hides));
         Put(detail, L"redraws", static_cast<double>(redraws));
         Put(detail, L"surfaceBytes", static_cast<double>(surfaceBytes));
+        Put(detail,L"trayReorderBytes",static_cast<double>(trayDrag?trayDrag->bytes:0));
         Put(detail,L"mediaMarqueeBytes",static_cast<double>(marqueeBytes));Put(detail,L"refreshFeedbackBytes",static_cast<double>(refreshBytes));
         if(auto it=NativeGlassStates().find(hwnd);it!=NativeGlassStates().end()){Put(detail,L"material",it->second.reason);Put(detail,L"materialHresult",static_cast<double>(it->second.error));}
         Put(detail, L"dpi", dpi);detail.Insert(L"centeredAtTrigger",JsonValue::CreateBooleanValue(centeredAtTrigger));
@@ -358,7 +431,9 @@ struct NativePopup
     }
     virtual void Hide(bool notify = true, bool restore = false)
     {
+        trayOutside.Stop();
         if(!visible||dismissing)return;
+        if(trayDrag){ResetTrayDrag();Draw();}
         if(kind==L"@magic/apps-menu")CloseAppMenu();
         FinishResize(true,false);FinishFlyoutResize();
         if(hwnd)KillTimer(hwnd,95);if(refreshVisual)refreshVisual.StopAnimation(L"RotationAngleInDegrees");for(auto &[_,m]:mediaMarquees)if(m.text)m.text.StopAnimation(L"Offset");
@@ -379,6 +454,7 @@ struct NativePopup
     }
     void FinishHide(bool notify=false,bool restore=false)
     {
+        trayOutside.Stop();
         if (!visible)
             return;
         visible = false;dismissing=false;closing=true;ShowWindow(hwnd,SW_HIDE);ResetPanelMotion();
@@ -395,7 +471,7 @@ struct NativePopup
         SetTimer(app.relay, 74, 2000, nullptr);
         if(tooltip){DestroyWindow(tooltip);tooltip=nullptr;}
         officialPanelIcons.documents.clear();functionalFrames.clear();functionalSections.clear();functionalPinned.clear();
-        appearanceIcons.Clear();tooltipLayout.text=nullptr;iconRequests.clear();imageSources.clear();iconReady=false;
+        appearanceIcons.Clear();tooltipLayout.text=nullptr;iconRequests.clear();imageSources.clear();resolvedExecutables.clear();iconReady=false;
         pickerConfirm=false;pickerCatalog=JsonArray{};pickerDefinitions=nullptr;pickerRevision=0;
         armed.clear();armedUntil=0;
         if (life)
@@ -417,6 +493,8 @@ struct NativePopup
     }
     void Release(bool keepFeedback=false)
     {
+        ResetTrayDrag();
+        if(!keepFeedback){for(auto &[id,toggle]:toggleVisuals)toggle.Release();toggleVisuals.clear();}
         if(!keepFeedback)StopRefreshFeedback();ClearMediaMarquees();
         FinishResize(false,false);FinishFlyoutResize(false);ResetPanelMotion(false);interactionVisual.Release(popupRoot);glassSheet.Release(popupRoot);
         for(auto const &tile:pickerTiles)if(popupRoot)popupRoot.Children().Remove(tile.visual);
@@ -545,6 +623,7 @@ struct NativePopup
             float y = 102;
             for (int i = 0; i < 10; i++)
             {
+                if (i == 0 && !Bool(Account(), L"honorSignedIn")) continue;
                 if (i == 2 || i == 6 || i == 9)
                     y += 8;
                 auto const &item = items[i];
@@ -606,6 +685,7 @@ struct NativePopup
         kind = nextKind;
         status.clear();
         previewPreparing=LocalDockPreview();previewMounted=false;previewEnterAt=0;
+        musicPress.clear();musicDropTarget.clear();musicDragging=false;
         bluetoothExpanded.clear();networkExpanded.clear();quickDevices=audioAdvanced=false;flyoutExpanded=flyoutDragging=flyoutInFlight=flyoutPending=false;flyoutScroll=0;
         focus = -1;hover=-1;
         scroll = 0;
@@ -623,17 +703,20 @@ struct NativePopup
         month = selectedMonth = now.wMonth;
         selectedDay = now.wDay;
         generic = data.HasKey(L"rows");
-        width = Flyout()?380:FunctionalPanel()?360:LocalContext()?300:LocalPicker()?960:kind==L"@magic/apps-menu"?760:kind==L"@magic/task-switcher"?800:kind==L"@magic/user-menu"?370:kind==L"@magic/quick-settings"?360:kind==L"@magic/power-menu"?380:320;
+        width = Flyout()?380:MusicView()?480:FunctionalPanel()?360:LocalContext()?300:LocalPicker()?960:kind==L"@magic/apps-menu"?760:kind==L"@magic/task-switcher"?800:kind==L"@magic/user-menu"?370:kind==L"@magic/quick-settings"?360:kind==L"@magic/power-menu"?380:320;
         height = generic                             ? 74 + std::min(8u, data.GetNamedArray(L"rows").Size()) * 56.0f
                  : kind == L"@magic/calendar-popup" ? CalendarHeight()
-                 : kind == L"@magic/user-menu"      ? 510
+                 : kind == L"@magic/user-menu"      ? 0
                                                 : 110 + std::min(6u, data.GetNamedArray(L"layouts").Size()) * 62.0f;
         auto payload = value.GetNamedObject(L"payload"), point = payload.GetNamedObject(L"desiredPosition");
         int ax = static_cast<int>(Num(point, L"x")), ay = static_cast<int>(Num(point, L"y"));
         if (std::abs(static_cast<long long>(ax)) > 65536 || std::abs(static_cast<long long>(ay)) > 65536)
             throw std::runtime_error("Invalid popup anchor");
         previousFocus = GetForegroundWindow();
-        if(kind==L"@magic/apps-menu"){MONITORINFO display{sizeof(display)};GetMonitorInfoW(MonitorFromWindow(previousFocus,MONITOR_DEFAULTTOPRIMARY),&display);ax=(display.rcWork.left+display.rcWork.right)/2;ay=(display.rcWork.top+display.rcWork.bottom)/2;}
+        if(kind==L"@magic/apps-menu"){
+            auto monitor=NativeStartMenuMonitor(POINT{ax,ay},Bool(payload,L"followForeground"),previousFocus);
+            MONITORINFO display{sizeof(display)};if(GetMonitorInfoW(monitor,&display)){ax=(display.rcWork.left+display.rcWork.right)/2;ay=(display.rcWork.top+display.rcWork.bottom)/2;}
+        }
         ResetIncompatibleHost();
         if (!hwnd)
         {
@@ -662,6 +745,7 @@ struct NativePopup
         float scale = dpi / 96;
         MONITORINFO available{sizeof(available)};
         GetMonitorInfoW(MonitorFromPoint({ax, ay}, MONITOR_DEFAULTTONEAREST), &available);
+        if(LocalContext())available.rcWork=ContextWorkArea(available.rcWork);
         if(LocalPicker()){
             float vw=(available.rcMonitor.right-available.rcMonitor.left)/scale,vh=(available.rcMonitor.bottom-available.rcMonitor.top)/scale;
             float top=vh*.14f,bottom=88;
@@ -674,8 +758,8 @@ struct NativePopup
             Put(payload,L"alignX",std::wstring(L"Center"));Put(payload,L"alignY",std::wstring(L"Start"));
         }
         else if(kind==L"@magic/apps-menu"){
-            // A keyboard trigger uses the foreground display, never the pointer position.
-            MONITORINFO foreground{sizeof(foreground)};GetMonitorInfoW(MonitorFromWindow(previousFocus,MONITOR_DEFAULTTOPRIMARY),&foreground);available=foreground;
+            // The anchor was already resolved before DPI selection: clicked display
+            // for a button, foreground display (or pointer fallback) for the Win key.
             ax=(available.rcWork.left+available.rcWork.right)/2;ay=(available.rcWork.top+available.rcWork.bottom)/2;
             Put(payload,L"alignX",std::wstring(L"Center"));Put(payload,L"alignY",std::wstring(L"Center"));
             if(Bool(data,L"fullscreen")){width=(available.rcWork.right-available.rcWork.left)/scale-24;height=(available.rcWork.bottom-available.rcWork.top)/scale-24;}
@@ -691,9 +775,7 @@ struct NativePopup
             width=tooltipLayout.width;height=tooltipLayout.height;
         }
         else if(LocalContext()){
-            width=Str(data,L"menuStyle")==L"shell"?240:300;
-            if(Str(data,L"menuStyle")==L"toolbar"){width=200;for(auto const &v:data.GetNamedArray(L"rows")){auto label=Str(v.GetObject(),L"label");com_ptr<IDWriteTextLayout> layout;auto f=app.graphics.Format(12.8f,false,600);check_hresult(app.graphics.text->CreateTextLayout(label.c_str(),static_cast<UINT32>(label.size()),f,4096,100,layout.put()));DWRITE_TEXT_METRICS metrics{};layout->GetMetrics(&metrics);width=std::max(width,metrics.widthIncludingTrailingWhitespace+80);}}
-            LayoutContext((available.rcWork.right-available.rcWork.left)/scale-12,(available.rcWork.bottom-available.rcWork.top)/scale-12,width);
+            LayoutContext((available.rcWork.right-available.rcWork.left)/scale-12,(available.rcWork.bottom-available.rcWork.top)/scale-12,ContextPreferredWidth());
         }
         else if (generic)
         {
@@ -706,6 +788,9 @@ struct NativePopup
             if(kind==L"@magic/quick-settings")height=std::min(620.f,(available.rcWork.bottom-available.rcWork.top)/scale-20);
             if(kind==L"@magic/system-tray")height=70+std::ceil(data.GetNamedArray(L"rows").Size()/5.f)*56;
         }
+        if(kind==L"@magic/user-menu"){
+            BuildRows();height=UserMenuHeight();
+        }
         if(generic&&!Flyout()&&!LocalDockPreview()&&!LocalTooltip()&&!LocalPicker()&&!LocalContext()&&kind!=L"@magic/apps-menu"&&!Modal()){
             BuildRows();float bottom=84;for(auto const &row:rows){if(kind==L"@magic/quick-settings"&&(row.id==L"power"||row.id==L"quick-back"||row.id==L"system-power"))continue;if(FunctionalPanel()&&functionalPinned.contains(row.id))continue;bottom=std::max(bottom,row.rect.bottom);}
             if(CenterPanel())bottom=std::max(bottom,functionalExtent);
@@ -716,7 +801,7 @@ struct NativePopup
             float limit=NativeGlassHeightLimit(width,scale,MaterialTier());
             if(limit>=220)height=std::min(height,limit);
         }
-        if(!LocalPicker()){
+        if(!LocalPicker()&&!LocalContext()){
             width=std::min(width,(available.rcWork.right-available.rcWork.left)/scale-20);
             height=std::min(height,(available.rcWork.bottom-available.rcWork.top)/scale-20);
             float fit=std::min(1.f,std::sqrt((8*1024*1024.f)/(width*height*scale*scale*4)));
@@ -731,32 +816,20 @@ struct NativePopup
         int x = ax - offset(Str(payload, L"alignX"), pw), y = ay - offset(Str(payload, L"alignY"), ph);
         MONITORINFO monitor{sizeof(monitor)};
         GetMonitorInfoW(MonitorFromPoint({ax, ay}, MONITOR_DEFAULTTONEAREST), &monitor);
+        if(LocalContext())monitor.rcWork=ContextWorkArea(monitor.rcWork);
         if (pw > monitor.rcWork.right - monitor.rcWork.left || ph > monitor.rcWork.bottom - monitor.rcWork.top)
             throw std::runtime_error("Popup exceeds monitor work area; use compatible popup");
         pw = std::min(pw, static_cast<int>(monitor.rcWork.right - monitor.rcWork.left));
         ph = std::min(ph, static_cast<int>(monitor.rcWork.bottom - monitor.rcWork.top));
-        if(LocalContext()&&Num(payload,L"contextDepth")>0&&payload.HasKey(L"contextParentLeft")){
-            auto side=NativeContextMotion::ChildX(static_cast<int>(Num(payload,L"contextParentLeft")),static_cast<int>(Num(payload,L"contextParentRight")),pw,monitor.rcWork,scale);
-            ax=x=side.x;payload.Insert(L"contextFlipped",JsonValue::CreateBooleanValue(side.flipped));
-        }
         x = std::clamp(x, static_cast<int>(monitor.rcWork.left), static_cast<int>(monitor.rcWork.right) - pw);
         if(ToolbarDropdown()&&Str(payload,L"alignY")==L"Start")y=DropdownTop(ay,scale);
         y = DropdownClampTop(y,monitor.rcWork,ph);
+        if(Flyout()){auto origin=NativeHintPlacement::Origin(payload,monitor.rcWork,pw,ph);x=origin.x;y=origin.y;}
         centeredAtTrigger=false;motionAnchorX=-1;
         if(ToolbarDropdown()&&(Str(payload,L"alignY")==L"Start"||Str(payload,L"alignY")==L"End")) {auto placement=NativePlacePopup(ax,pw,monitor.rcWork,Str(payload,L"alignX"),scale);x=placement.x;centeredAtTrigger=placement.centered;motionAnchorX=placement.origin;}
         previewOrigin={static_cast<float>((Num(payload,L"previewAnchorX",ax)-x)/scale),Str(payload,L"alignY")==L"End"?height:Str(payload,L"alignY")==L"Start"?0.f:static_cast<float>((Num(payload,L"previewAnchorY",ay)-y)/scale)};
         contentX=contentY=0;
-        if(AnimatedContext()){
-            contextChild=Num(payload,L"contextDepth")>0;contextFlipped=Bool(payload,L"contextFlipped");
-            auto placement=NativeContextMotion::Place({ax,ay},monitor.rcWork,pw,ph,scale,contextChild,contextFlipped,static_cast<float>(Num(payload,L"contextAnchorY",ay+22*scale)));
-            if(!DesktopContext()&&!contextChild){
-                // Keep the bar's existing centered/edge-clamped placement.
-                contextOrigin={std::clamp((ax-x)/scale,4.f,width-4),std::clamp((ay-y)/scale,4.f,height-4)};
-            }else{x=placement.x;y=placement.y;contextOrigin=placement.origin;}
-            // Transparent overshoot allowance is not a second material/background.
-            contentX=NativeContextMotion::Gutter(width);contentY=NativeContextMotion::Gutter(height);
-            x-=static_cast<int>(contentX*scale);y-=static_cast<int>(contentY*scale);pw+=static_cast<int>(2*contentX*scale);ph+=static_cast<int>(2*contentY*scale);
-        }
+        if(LocalContext()){auto bounds=ContextBounds({ax,ay},monitor.rcWork);x=bounds.left;y=bounds.top;pw=bounds.right-bounds.left;ph=bounds.bottom-bounds.top;}
         if(Modal()){
             int fullW=monitor.rcWork.right-monitor.rcWork.left,fullH=monitor.rcWork.bottom-monitor.rcWork.top;
             contentX=(fullW-pw)/2.f/scale;contentY=(fullH-ph)/2.f/scale;
@@ -805,6 +878,8 @@ struct NativePopup
             if(GetForegroundWindow()==hwnd)SetFocus(hwnd);
         }
         shows++;
+        if(kind==L"@magic/system-tray"&&!app.model.synthetic&&!app.popupCycles&&!measurement)
+            trayOutside.Start(hwnd,TrayOutsideMessage,[this](POINT point){auto r=ContentScreenRect();return PtInRect(&r,point)!=FALSE;});
         if (kind == L"@magic/calendar-popup")
             SetTimer(hwnd, 81, 60000 - now.wSecond * 1000 - now.wMilliseconds, nullptr);
         if (passive)
@@ -841,9 +916,10 @@ struct NativePopup
     }
     void Update(JsonObject const &value)
     {
-        if((kind==L"@magic/system-tray"||kind==L"@magic/apps-menu")&&pressedTray>=0){if(GetCapture()==hwnd)ReleaseCapture();pressedTray=-1;trayDragging=false;}
         if (!visible || dismissing || Str(value, L"token") != token)
             return;
+        if(kind==L"@magic/system-tray"&&DeferTrayUpdate(value))return;
+        if(kind==L"@magic/apps-menu"&&pressedTray>=0){if(GetCapture()==hwnd)ReleaseCapture();pressedTray=-1;trayDragging=false;}
         if(!resizePreparing&&TryResizeUpdate(value))return;
         bool previousPower=PowerView(),previousFullscreen=Bool(Data(),L"fullscreen");
         bool enteringAllApps=kind==L"@magic/apps-menu"&&Str(Data(),L"appsView")!=L"all"&&Str(value.GetNamedObject(L"data"),L"appsView")==L"all";
@@ -889,7 +965,7 @@ struct NativePopup
         if(AdjustableRange(row)){SetRangeValue(row.id,value<0?row.value:value);SendRangeValue(true);return;}
         if(row.control==L"toggle"&&value<0)value=row.value>.5?0:1;
         if(auto host=static_cast<DWORD>(Num(Data(),L"hostPid")))AllowSetForegroundWindow(host);
-        if(kind==L"@magic/system-tray"&&button==2){
+        if(kind==L"@magic/system-tray"&&row.control==L"tray"&&button>=0&&button<=3){
             for(auto const &v:Data().GetNamedArray(L"rows")){auto item=v.GetObject();if(Str(item,L"id")!=row.id)continue;
                 POINT point{};GetCursorPos(&point);MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromPoint(point,MONITOR_DEFAULTTONEAREST),&monitor);
                 bool above=point.y>(monitor.rcWork.top+monitor.rcWork.bottom)/2;
@@ -903,6 +979,7 @@ struct NativePopup
         Put(result, L"id", row.id);
         Put(result, L"value", value < 0 ? row.value : value);
         Put(result, L"button", static_cast<double>(button));
+        if(kind==L"@magic/system-tray"){POINT point{};GetCursorPos(&point);Put(result,L"x",static_cast<double>(point.x));Put(result,L"y",static_cast<double>(point.y));}
         Put(result,L"destination",destination);
         if(kind==L"@magic/apps-menu"&&button==0&&row.id.rfind(L"app:",0)==0){for(auto const &v:Data().GetNamedArray(L"rows")){auto value=v.GetObject();if(Str(value,L"id")==row.id&&Bool(value,L"folder")){scroll=0;break;}}}
         JsonObject fields;
@@ -941,10 +1018,12 @@ struct NativePopup
     }
     virtual void Draw()
     {
+        for(auto it=toggleVisuals.begin();it!=toggleVisuals.end();){bool keep=std::any_of(rows.begin(),rows.end(),[&](auto const&r){return r.id==it->first&&r.control==L"toggle"&&!r.offscreen;});if(!keep){it->second.Release();it=toggleVisuals.erase(it);}else ++it;}
         if(flyoutResize||resizeMotion)return;
         NativeRenderScope rendering(app.relay);if(!rendering){if(hwnd)InvalidateRect(hwnd,nullptr,FALSE);return;}
         if (!visible || dismissing || !hwnd)
             return;
+        if(trayDrag)SyncTrayDrag();
         SyncRefreshFeedback();
         SyncMediaMarquees();
         if(interactionVisual.root&&interactionVisual.active)SyncInteraction(Hit(interactionPoint.x+contentX,interactionPoint.y+contentY));
@@ -1033,6 +1112,7 @@ struct NativePopup
         }
         auto row = rows[index];
         auto action = row.action;
+        if(MusicView()&&row.control==L"music-source")return;
         if(LocalContext()){
             auto action=contextAction;if(action)action(row.id);return;
         }
@@ -1168,7 +1248,11 @@ struct NativePopup
         if(Flyout()&&flyoutExpanded&&(key==VK_PRIOR||key==VK_NEXT)){flyoutScroll=std::clamp(flyoutScroll+(key==VK_PRIOR?-200.f:200.f),0.f,std::max(0.f,flyoutFullHeight-(flyoutBody.bottom-flyoutBody.top)));Draw();return;}
         if(Flyout()&&focus>=0&&focus<static_cast<int>(rows.size())&&rows[focus].control==L"range"&&(key==VK_LEFT||key==VK_RIGHT||key==VK_HOME||key==VK_END)){SetFlyoutValue(key==VK_HOME?0:key==VK_END?1:rows[focus].value+(key==VK_LEFT?-.01:.01));SendFlyoutValue();return;}
         if(focus>=0&&focus<static_cast<int>(rows.size())&&AdjustableRange(rows[focus])&&(key==VK_LEFT||key==VK_RIGHT||key==VK_HOME||key==VK_END)){auto row=rows[focus];SetRangeValue(row.id,key==VK_HOME?0:key==VK_END?1:row.value+(key==VK_LEFT?-.01:.01));return;}
-        if(kind==L"@magic/system-tray"&&key=='P'&&(GetKeyState(VK_CONTROL)&0x8000)&&focus>=0&&focus<static_cast<int>(rows.size())){Command(rows[focus],-1,4);return;}
+        if(MusicView()&&(GetKeyState(VK_CONTROL)&0x8000)&&(key==VK_UP||key==VK_DOWN)&&focus>=0&&focus<static_cast<int>(rows.size())){
+            std::vector<std::wstring> ids;for(auto const &r:rows)if(r.control==L"music-source")ids.push_back(r.id);
+            auto id=rows[focus].id;auto split=id.find(L':');if(split!=id.npos){id=L"music-source:"+id.substr(split+1);auto it=std::find(ids.begin(),ids.end(),id);if(it!=ids.end()){int from=static_cast<int>(it-ids.begin()),to=from+(key==VK_UP?-1:1);if(to>=0&&to<static_cast<int>(ids.size()))MusicReorder(id,ids[to]);}}return;
+        }
+        if(kind==L"@magic/system-tray"&&key=='P' &&(GetKeyState(VK_CONTROL)&0x8000)&&focus>=0&&focus<static_cast<int>(rows.size())){Command(rows[focus],-1,4);return;}
         if(LocalDockPreview()&&(key==VK_UP||key==VK_DOWN||key==VK_LEFT||key==VK_RIGHT||key==VK_TAB||key==VK_HOME||key==VK_END)){
             int count=static_cast<int>(rows.size());if(!count)return;int columns=std::max(1,static_cast<int>((width-8)/264));int step=key==VK_UP?-columns*2:key==VK_DOWN?columns*2:key==VK_LEFT?-2:key==VK_RIGHT?2:((GetKeyState(VK_SHIFT)&0x8000)?-1:1);
             focus=key==VK_HOME?0:key==VK_END?count-1:std::clamp(focus<0?0:focus+step,0,count-1);auto rect=rows[focus].rect;
@@ -1260,6 +1344,7 @@ struct NativePopup
             if(self->resizeMotion&&(message==WM_LBUTTONDOWN||message==WM_LBUTTONUP||message==WM_RBUTTONDOWN||message==WM_RBUTTONUP||message==WM_KEYDOWN||message==WM_MOUSEWHEEL)){POINT point{GET_X_LPARAM(l),GET_Y_LPARAM(l)};bool client=message!=WM_KEYDOWN&&message!=WM_MOUSEWHEEL;if(client)ClientToScreen(window,&point);self->FinishResize();if(client){ScreenToClient(window,&point);l=MAKELPARAM(point.x,point.y);}}
             if(self->FlyoutPointer(message,w,l))return 0;
             if(self->RangePointer(message,w,l))return 0;
+            if(self->MusicPointer(message,w,l))return 0;
             switch (message)
             {
             case WM_NCHITTEST:if(self->dismissing||self->LocalDockPreview()&&self->opening)return HTTRANSPARENT;
@@ -1268,11 +1353,13 @@ struct NativePopup
             case WM_LBUTTONDOWN:
                 if(self->LocalContext()&&self->ContextOverflows()&&GET_X_LPARAM(l)*96/self->dpi-self->contentX>=self->width-14){self->contextDragging=true;self->contextDragY=GET_Y_LPARAM(l)*96/self->dpi-self->contentY;self->contextDragStart=self->contextScroll;SetCapture(window);return 0;}
                 self->app.inputEpoch++;
+                if(self->kind==L"@magic/system-tray"&&self->trayDrag){if(self->trayDrag->awaiting)return 0;self->FinishTrayFeedback();}
                 if(self->kind==L"@magic/system-tray"||self->kind==L"@magic/apps-menu"){
                     self->pressedTray=self->Hit(GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi);self->trayPress={GET_X_LPARAM(l),GET_Y_LPARAM(l)};self->trayDragging=false;SetCapture(window);
                 }
                 break;
-            case WM_CAPTURECHANGED:self->pressedTray=-1;self->trayDragging=false;self->contextDragging=false;return 0;
+            case WM_CAPTURECHANGED:if(self->trayDrag&&self->trayDrag->moving)self->EndTrayDrag(false);self->pressedTray=-1;self->trayDragging=false;self->contextDragging=false;return 0;
+            case WM_CANCELMODE:if(self->trayDrag&&self->trayDrag->moving)self->EndTrayDrag(false);if(GetCapture()==window)ReleaseCapture();self->pressedTray=-1;self->trayDragging=false;return 0;
             case WM_ERASEBKGND:
                 return 1;
             case WM_PAINT: {
@@ -1283,6 +1370,8 @@ struct NativePopup
                 return 0;
             }
             case WM_KEYDOWN:
+                if(w==VK_ESCAPE&&self->trayDrag){if(self->trayDrag->moving)self->EndTrayDrag(false);else self->Hide();return 0;}
+                if(self->trayDrag)return 0;
                 self->Key(static_cast<UINT>(w));
                 return 0;
             case WM_LBUTTONUP: {
@@ -1294,13 +1383,10 @@ struct NativePopup
                     if(dragged)return 0;
                 }
                 if(self->kind==L"@magic/system-tray"){
+                    if(self->trayDrag&&self->trayDrag->moving){self->MoveTrayDrag(GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi);self->EndTrayDrag(true);return 0;}
                     int from=self->pressedTray;bool dragged=self->trayDragging;self->pressedTray=-1;self->trayDragging=false;if(GetCapture()==window)ReleaseCapture();
                     if(from<0)return 0;
-                    if(from<0)return 0;
-                    if(dragged){if(Str(self->Data(),L"appsView")!=L"all"&&from>=0&&index>=0&&from!=index&&from<static_cast<int>(self->rows.size())){
-                        JsonObject r,command;Put(r,L"action",std::wstring(L"native-command"));Put(r,L"id",self->rows[from].id);Put(r,L"button",5.0);Put(r,L"destination",self->rows[index].id);
-                        Put(command,L"op",std::wstring(L"popup-command"));Put(command,L"token",self->token);command.Insert(L"result",r);self->app.Request(command);
-                    }return 0;}
+                    if(dragged||index!=from)return 0;
                     if(index>=0){auto row=self->rows[index];float x=GET_X_LPARAM(l)*96/self->dpi,y=GET_Y_LPARAM(l)*96/self->dpi;
                         if(x>=row.rect.right-16&&y<row.rect.top+16){self->Command(row,-1,4);return 0;}}
                 }
@@ -1332,6 +1418,7 @@ struct NativePopup
                 }
                 if(self->pressedTray>=0&&(w&MK_LBUTTON)&&
                     (std::abs(GET_X_LPARAM(l)-self->trayPress.x)>=GetSystemMetrics(SM_CXDRAG)||std::abs(GET_Y_LPARAM(l)-self->trayPress.y)>=GetSystemMetrics(SM_CYDRAG)))self->trayDragging=true;
+                if(self->kind==L"@magic/system-tray"&&self->trayDragging){self->MoveTrayDrag(GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi);return 0;}
                 int next=self->Hit(GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi);
                 self->interactionPoint={GET_X_LPARAM(l)*96/self->dpi-self->contentX,GET_Y_LPARAM(l)*96/self->dpi-self->contentY};self->SyncInteraction(next);
                 if(next!=self->hover){KillTimer(window,96);self->hover=next;if(self->LocalContext()&&next>=0&&self->contextPrepare&&self->rows[next].control==L"submenu")SetTimer(window,96,100,nullptr);if(self->tooltip)SendMessageW(self->tooltip,TTM_POP,0,0);self->Draw();if(self->LocalContext()&&next>=0&&self->contextHover){auto callback=self->contextHover;callback(self->rows[next].id);}}
@@ -1358,6 +1445,7 @@ struct NativePopup
             case WM_MBUTTONUP:
                 if(self->LocalDockPreview()){if(message==WM_MBUTTONUP)self->MiddleActivate(self->Hit(GET_X_LPARAM(l)*96/self->dpi,GET_Y_LPARAM(l)*96/self->dpi));return 0;}
             case WM_LBUTTONDBLCLK: {
+                if(self->trayDrag){if(self->trayDrag->moving)self->EndTrayDrag(false);return 0;}
                 int index = self->Hit(GET_X_LPARAM(l) * 96 / self->dpi, GET_Y_LPARAM(l) * 96 / self->dpi);
                 if(self->kind==L"@magic/apps-menu"&&message==WM_RBUTTONUP){POINT p{};GetCursorPos(&p);self->AppMenu(index,p);return 0;}
                 if(self->LocalPicker()&&message==WM_RBUTTONUP){POINT p{};GetCursorPos(&p);self->PickerMenu(index,p);return 0;}
@@ -1385,6 +1473,7 @@ struct NativePopup
                 }
                 break;
             case WM_MOUSEWHEEL:
+                if(self->trayDrag)return 0;
                 if(self->LocalDockPreview()){self->previewScroll-=GET_WHEEL_DELTA_WPARAM(w)/120.f*96;self->BuildRows();self->Draw();return 0;}
                 if(self->LocalContext())return 0;
                 if (self->generic || self->kind == L"@magic/keyboard-selector")
@@ -1394,8 +1483,14 @@ struct NativePopup
                     self->Draw();
                 }
                 return 0;
+            case ContextOutsideMessage:
+                if(auto callback=self->contextOutside)callback(static_cast<uint64_t>(w));
+                return 0;
+            case TrayOutsideMessage:
+                if(self->trayOutside.Accept(static_cast<uint64_t>(w)))self->Hide();
+                return 0;
             case WM_ACTIVATE:
-                if (LOWORD(w) == WA_INACTIVE && !self->closing&&!self->contextMenuOpen && !(self->contextFamily&&self->contextFamily(reinterpret_cast<HWND>(l))) && reinterpret_cast<HWND>(l) != self->hwnd &&
+                if (LOWORD(w) == WA_INACTIVE && !self->trayOutside.hook && !self->closing&&!self->contextMenuOpen && !(self->contextFamily&&self->contextFamily(reinterpret_cast<HWND>(l))) && reinterpret_cast<HWND>(l) != self->hwnd &&
                     !IsChild(self->hwnd, reinterpret_cast<HWND>(l))&&!self->InputFamily(reinterpret_cast<HWND>(l)))
                     self->Hide();
                 return 0;
@@ -1407,6 +1502,7 @@ struct NativePopup
                     self->FinishHide(true);
                 return 0;
             case WM_TIMER:
+                if(w==97){self->FinishTrayFeedback();return 0;}
                 if(w==96){KillTimer(window,96);if(self->visible&&!self->dismissing&&self->LocalContext()&&self->hover>=0&&static_cast<size_t>(self->hover)<self->rows.size()&&self->contextPrepare){auto prepare=self->contextPrepare;prepare(self->rows[self->hover].id);}return 0;}
                 if(w==95){self->StopRefreshFeedback();self->Draw();return 0;}
                 if(w==94){self->FinishResize(true,true,true);return 0;}
@@ -1511,6 +1607,7 @@ struct NativePopup
 #include "native-flyout.h"
 #include "native-range.h"
 #include "native-popup-appearance.h"
+#include "native-tray-drag.h"
 #include "native-popup-resize.h"
 
 #include "native-card-picker.h"

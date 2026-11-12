@@ -19,7 +19,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
     private readonly NativeNetworkPortal networkPortal;
     private readonly NativeNetworkDetails networkDetails, bluetoothDetails;
     private readonly ToolbarExtensions extensions;private int extensionProjectionQueued;
-    private readonly NativeToolbarLyrics lyrics;
+    private readonly NativeToolbarMusic music;
     private readonly ElevatedWindowActions elevatedWindows;
     private readonly NativeSystemPresentationSession presentation;
     private readonly CompositionShellSession shell;
@@ -49,6 +49,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
     private JsonElement CurrentView => Volatile.Read(ref latestView).Data;
     private int expectedBars, closing;private bool mediaPopupSubscribed;
     private volatile bool notificationQuiet;
+    private readonly PcManagerApplication? pcManager = PcManagerApplication.Find();
     private Task[] work = []; private long startMenuEpoch, quickSettingsEpoch, popupGeneration;
     private NativeSystemUiSession(NativeSystemDeployment deployment, NativeSystemClient backend, CompositionShellSession shell, CompositionPopupSession popups, int renderer, Dispatcher ui, Func<string, Task> community, Func<object, Task> send, Action<string, object> log)
     {
@@ -59,7 +60,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
         bluetoothDetails = new(ct => backend.Request("bluetooth-read", new { }, ct), PublishBluetoothDetails, stop.Token);
         networkPortal=new(PortalChanged,uri=>ui.BeginInvoke(new Action(()=>{if(stop.IsCancellationRequested||Volatile.Read(ref closing)!=0)return;try{OpenUri(uri);}catch(Exception e)when(e is not OutOfMemoryException){log("wifi_auth_open_failed",new{type=e.GetType().Name});}})));
         extensions=new(deployment.DataDirectory,QueueExtensionProjection,log,StateStore.AtomicWrite);shell.ExtensionState=ExtensionRenderState;
-        lyrics=new(QueueExtensionProjection);
+        music=new(QueueExtensionProjection,deployment.DataDirectory,(path,text)=>StateStore.AtomicWrite(path,text,null));
         LoadPreferences(); shell.InlineImage = Image; popups.InlineImage = Image; shell.BarReady += BarReady;
     }
     private string? Image(string id) => Volatile.Read(ref images).GetValueOrDefault(id);
@@ -95,9 +96,11 @@ internal sealed partial class NativeSystemUiSession : IDisposable
     {
         if(!projectionOnly){notificationWindows.Observe(presentation.State.Snapshot);
             if(presentation.State.Providers.TryGetValue("wifi",out var wifiStatus))networkPortal.Observe(wifiStatus);
-            ProjectJumpLists(projected);EmitMediaCard();extensions.Configure(projected);}
+            ProjectJumpLists(projected);extensions.Configure(projected);}
         extensions.Project(projected);
-        lyrics.Project(projected,presentation.State.Providers.GetValueOrDefault("media"));
+        ProjectPcManager(projected);
+        bool musicVisible;lock(currentGate)musicVisible=currentPanel?.Data["nativeMusicView"]?.GetValue<bool>()==true;
+        lock(mediaProjectionGate){music.Project(projected,presentation.State.Providers.GetValueOrDefault("media"),musicVisible,mediaCardWanted);EmitMediaCard();}
         projected["hostPid"]=Environment.ProcessId;
         projected["magicNotificationQuiet"]=notificationQuiet;
         if(!projectionOnly){var nextImages = new Dictionary<string, string>(StringComparer.Ordinal); foreach (var icon in Array(presentation.State.Providers.GetValueOrDefault("tray"), "icons")) { string png = Text(icon, "png"); if (png.Length is > 0 and < 90000) nextImages["tray:" + Text(icon, "id")] = "data:image/png;base64," + png; }
@@ -108,11 +111,11 @@ internal sealed partial class NativeSystemUiSession : IDisposable
         expectedBars = Array(view, "monitors").Sum(m => (Flag(m, "toolbar") ? 1 : 0) + (Flag(m, "dock") ? 1 : 0));
         if (expectedBars == 0) throw new InvalidDataException("Independent validation requires an enabled toolbar or Dock.");
         if(lastShellView!=serialized){var result=await shell.Update(JsonSerializer.SerializeToElement(new { data = view }), cancellation);if(Flag(JsonSerializer.SerializeToElement(result),"accepted")){lastShellView=serialized;Interlocked.Increment(ref shellPublishes);}}else Interlocked.Increment(ref shellDuplicates);await ui.InvokeAsync(BarReady);
-        if(projectionOnly)return;
+        if(projectionOnly){if(musicVisible)await PublishMusicPanel(cancellation);return;}
         long menuEpoch = (long)Number(presentation.State.Snapshot, "startMenuEpoch"); if (menuEpoch > startMenuEpoch) { startMenuEpoch = menuEpoch; await Open("@magic/apps-menu", default); }
         long quickEpoch=(long)Number(presentation.State.Snapshot,"quickSettingsEpoch");
         if(quickEpoch>quickSettingsEpoch){quickSettingsEpoch=quickEpoch;await Open("@magic/quick-settings",default);}
-        string? token, kind; bool powerView,displayView; lock (currentGate) { token = currentToken; kind = currentKind; powerView=currentPanel?.Data["nativePowerView"]?.GetValue<bool>()==true;displayView=currentPanel?.Data["nativeDisplayView"]?.GetValue<bool>()==true; }
+        string? token, kind; bool powerView,displayView; lock (currentGate) { token = currentToken; kind = currentKind; powerView=currentPanel?.Data["nativePowerView"]?.GetValue<bool>()==true;displayView=currentPanel?.Data["nativeDisplayView"]?.GetValue<bool>()==true;musicVisible=currentPanel?.Data["nativeMusicView"]?.GetValue<bool>()==true; }
         if (token is not null && kind is not null && kind is not ("@magic/apps-menu" or "@magic/keyboard-selector" or "@magic/calendar-popup" or "@magic/user-menu"))
         {
             var topic = kind switch { "@magic/bluetooth-popup" => "bluetooth", "@magic/network-popup" => "wifi", "@magic/media-popup" => "media", "@magic/notifications" => "notifications", "@magic/system-tray" => "tray", _ => "windows-system" };
@@ -121,8 +124,9 @@ internal sealed partial class NativeSystemUiSession : IDisposable
             var state = presentation.State;
             if (topic == "bluetooth" && kind == "@magic/bluetooth-popup") { bluetoothDetails.Show(token); return; }
             if (topic == "wifi") { if (NetworkPopupAcceptsDetails(token)) networkDetails.Show(token); return; }
+            if(kind=="@magic/media-popup"&&musicVisible){await PublishMusicPanel(cancellation);return;}
             if (kind == "@magic/media-popup") state = await MediaState(state, cancellation);
-            var panel = NativeSystemPanel.Build(kind, NetworkState(state),powerView,notificationQuiet,displayView); panel.Data["hostPid"] = Environment.ProcessId; lock (currentGate) { if (currentToken == token) currentPanel = panel; else return; }
+            var panel = NativeSystemPanel.Build(kind, NetworkState(state),powerView,notificationQuiet,displayView,HonorPcManager.ServicesVisible); panel.Data["hostPid"] = Environment.ProcessId; lock (currentGate) { if (currentToken == token) currentPanel = panel; else return; }
             await popups.Update(JsonSerializer.SerializeToElement(new { token, data = panel.Data }), cancellation);
         }
     }
@@ -202,6 +206,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
         if(action is "activate" or "restore")NativeDesktopOcclusion.Covered(new IntPtr((long)Number(window,"hwnd")),renderer,lower:true);
         bool granted=(action is "activate" or "restore") && AllowSetForegroundWindow((uint)backend.ProcessId);
         var response=await backend.Request("window-action",new{windowId=Text(window,"nativeWindowId"),action},stop.Token);
+        bool foregroundReturned=Flag(response,"foregroundReturned");
         if(Flag(response,"needsElevation") && action is "activate" or "restore" or "minimize" or "close")
         {
             var observation = await ui.InvokeAsync(() => new WindowActionObservation(new IntPtr((long)Number(window,"hwnd"))));
@@ -218,12 +223,18 @@ internal sealed partial class NativeSystemUiSession : IDisposable
             finally { await ui.InvokeAsync(observation.Dispose); }
         }
         bool accepted=Flag(response,"accepted");
-        log("independent_native_window_action",new{action,foregroundGranted=granted,accepted,response});
+        log("independent_native_window_action",new{action,foregroundGranted=granted,foregroundReturned,accepted,response});
         if(!accepted)throw new InvalidOperationException(Flag(response,"restored") ? "窗口已恢复，但 Windows 未允许切到前台；请再次点击。" : "Windows 未完成窗口操作。请检查目标应用是否响应或受到权限限制。");
     }
     private async Task ShellCommand(JsonElement command)
     {
         string id = Text(command, "id"), verb = Text(command, "verb", "activate");
+        if(verb=="notification-open"){
+            string notificationId=Text(command,"notificationId"),appId=Text(command,"appId");
+            if(!NativeNotificationWindows.HasSource(presentation.State.Providers.GetValueOrDefault("notifications"),notificationId,appId))
+                throw new InvalidOperationException("这条通知已失效，请在通知中心重新选择。");
+            await OpenNotificationApplication(appId);return;
+        }
         if(verb=="extension-action"){_ = ExtensionInvoke(command);return;}
         if (id == "__measure-popup") { await Open(Text(command, "widget"), command); return; }
         if ((id is "bar:toolbar" or "bar:dock") && verb == "windows-authorization") { taskbar?.RevealWindowsEntry(); return; }
@@ -237,7 +248,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
             if(Text(offered,"type")=="Music"&&!Flag(offered,verb=="prev"?"canPrevious":verb=="next"?"canNext":Flag(offered,"playing")?"canPause":"canPlay"))return;
             await backend.Request("media-action", new { sessionId = Text(offered, "nativeSessionId"), trackId = Text(offered,"nativeTrackId"), action = verb == "prev" ? "previous" : verb == "play" ? "toggle" : "next" }, stop.Token); return;
         }
-        if(Text(offered,"type")=="Music")return;
+        if(Text(offered,"type")=="Music"&&verb=="activate"){var trigger=JsonNode.Parse(command.GetRawText())!.AsObject();trigger["nativeMusicView"]=true;await Open("@magic/media-popup",JsonSerializer.SerializeToElement(trigger));return;}
         if(Text(offered,"type")=="Media"&&verb=="open-source"){_ = OpenMediaSource(offered);return;}
         if (Text(offered, "type") == "Tray")
         {
@@ -258,11 +269,14 @@ internal sealed partial class NativeSystemUiSession : IDisposable
                 string key=Text(window,"nativeWindowId");
                 if(pendingWindowActions.TryAdd(key,0)) _=DispatchWindowAction(window,action,key);
             }
-            else Launch(offered, false); return;
+            // A tray restoration can wait for a new task window. Keep that
+            // bounded observation off the shared Dock/toolbar command queue.
+            else _=DispatchDockApplication(offered); return;
         }
         if (verb is "remove" or "move-left" or "move-right" or "edit-custom-icon") { await ConfigureBar(Text(offered, "nativeSurface", "dock"), command); return; }
         string module = Text(offered, "nativeModule");
         string kind = module switch { "magic.user" => "@magic/user-menu", "magic.power-menu" or "magic.battery" => "@magic/power-menu", "magic.clock" => "@magic/calendar-popup", "magic.tray" => "@magic/system-tray", "magic.bluetooth" => "@magic/bluetooth-popup", "magic.network" => "@magic/network-popup", "magic.keyboard" => "@magic/keyboard-selector", "magic.quick-settings" => "@magic/quick-settings", "magic.audio" or "magic.player" => "@magic/media-popup", "magic.notifications" => "@magic/notifications", "magic.start" => "@magic/apps-menu", _ => "" };
+        if (module == "magic.pc-manager") { (pcManager ?? throw new InvalidOperationException("未检测到荣耀或华为电脑管家。")).Open(); return; }
         if (module == "magic.desktop") { showDesktopCommand.Request(Notice); return; }
         if (module == "magic.recycle") { if (verb == "empty-bin") recycleBinCommand.Request(Notice); else OpenUri("shell:RecycleBinFolder"); return; }
         if(module=="magic.battery"){var trigger=JsonNode.Parse(command.GetRawText())!.AsObject();trigger["nativePowerView"]=true;await Open("@magic/quick-settings",JsonSerializer.SerializeToElement(trigger));return;}
@@ -323,7 +337,9 @@ internal sealed partial class NativeSystemUiSession : IDisposable
                 catch(NativeSystemRequestException e){log("input_target_unavailable",new{kind,e.Message});}
             }
             if (kind == "@magic/notifications") await backend.Request("notifications-subscribe", new { enabled = true }, stop.Token);
-            bool media = kind == "@magic/media-popup"; await SetMediaPopupSubscription(media);
+            bool musicView=kind=="@magic/media-popup"&&Flag(trigger,"nativeMusicView");
+            if(musicView)music.Observe(presentation.State.Providers.GetValueOrDefault("media"),true,true);
+            bool media = kind == "@magic/media-popup"&&!musicView; await SetMediaPopupSubscription(media);
             var state = media ? await MediaState(presentation.State, stop.Token) : presentation.State;
             if (kind == "@magic/keyboard-selector")
             {
@@ -340,7 +356,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
                 displayProviders["brightness"]=await backend.Request("brightness-read",new{refresh=true},stop.Token);
                 state=state with{Providers=displayProviders};
             }
-            double providerMs=timing.Elapsed.TotalMilliseconds;var panel = kind == "@magic/apps-menu" ? await AppsPanel(opening: true) : NativeSystemPanel.Build(kind, NetworkState(state),Flag(trigger,"nativePowerView"),notificationQuiet,Flag(trigger,"nativeDisplayView"));
+            double providerMs=timing.Elapsed.TotalMilliseconds;var panel = musicView ? music.Panel() : kind == "@magic/apps-menu" ? await AppsPanel(opening: true) : NativeSystemPanel.Build(kind, NetworkState(state),Flag(trigger,"nativePowerView"),notificationQuiet,Flag(trigger,"nativeDisplayView"),HonorPcManager.ServicesVisible);
             // The shared popup gate never waits for Wi-Fi enumeration. Show
             // current state now and refresh only the still-visible network token.
             if (kind == "@magic/network-popup") panel = NativeSystemPanel.Build(kind, NetworkPanelState(), notificationQuiet: notificationQuiet);
@@ -354,10 +370,11 @@ internal sealed partial class NativeSystemUiSession : IDisposable
             // Bar input grants this adapter foreground rights. Return them to
             // our owned renderer before it activates the requested popup.
             bool delegated=AllowSetForegroundWindow((uint)renderer);double panelMs=timing.Elapsed.TotalMilliseconds;
-            var opened = JsonSerializer.SerializeToElement(await popups.Open(JsonSerializer.SerializeToElement(new { widgetId = kind, payload = new { desiredPosition = new { x, y }, alignX = "Center", alignY = y > SystemParameters.PrimaryScreenHeight / 2 ? "End" : "Start" }, data = panel.Data }), stop.Token));
+            var opened = JsonSerializer.SerializeToElement(await popups.Open(JsonSerializer.SerializeToElement(new { widgetId = kind, payload = new { desiredPosition = new { x, y }, followForeground = kind=="@magic/apps-menu"&&trigger.ValueKind==JsonValueKind.Undefined, alignX = "Center", alignY = y > SystemParameters.PrimaryScreenHeight / 2 ? "End" : "Start" }, data = panel.Data }), stop.Token));
             log(kind=="@magic/apps-menu"?"independent_apps_open_timing":"independent_popup_open_timing",new{kind,triggerSource=trigger.ValueKind==JsonValueKind.Undefined?"keyboard":"shell",delegated,queueMs=queuedMs,providerMs=providerMs-queuedMs,panelMs=panelMs-providerMs,rendererAckMs=timing.Elapsed.TotalMilliseconds-panelMs,totalAckMs=timing.Elapsed.TotalMilliseconds,accepted=Flag(opened,"accepted"),scope="Owned renderer receipt; not first DWM frame"});
             if (!Flag(opened, "accepted")){if(media)await SetMediaPopupSubscription(false);return;} string token = Text(opened, "token");shown=true;
             lock (currentGate) { currentToken = token; currentKind = kind; currentPanel = panel; }
+            QueueExtensionProjection(); // Stop lyrics belonging only to the previous popup view.
             if (kind == "@magic/network-popup") networkDetails.Show(token);
             if (kind == "@magic/bluetooth-popup") bluetoothDetails.Show(token);
             _ = WaitPopup(token, kind, foreground, generation);
@@ -387,7 +404,8 @@ internal sealed partial class NativeSystemUiSession : IDisposable
         {
             if (kind == "@magic/network-popup") networkDetails.Hide(token);
             if (kind == "@magic/bluetooth-popup") bluetoothDetails.Hide(token);
-            lock (currentGate) { if (currentToken == token) { currentToken = currentKind = null; currentPanel = null; } }
+            bool musicClosed=false;lock (currentGate) { if (currentToken == token) { musicClosed=currentPanel?.Data["nativeMusicView"]?.GetValue<bool>()==true;currentToken = currentKind = null; currentPanel = null; } }
+            if(musicClosed)QueueExtensionProjection();
             if(kind=="@magic/media-popup"&&!stop.IsCancellationRequested){bool entered=false;try{await popupGate.WaitAsync(stop.Token);entered=true;if(Interlocked.Read(ref popupGeneration)==generation)await SetMediaPopupSubscription(false);}catch(Exception error)when(error is not OutOfMemoryException){log("independent_audio_panel_release",new{type=error.GetType().Name});}finally{if(entered)popupGate.Release();}}
         }
     }
@@ -447,7 +465,7 @@ internal sealed partial class NativeSystemUiSession : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref closing, 1) != 0) return;
-        lyrics.Dispose();
+        music.Dispose();
         try { string path = Path.Combine(deployment.Root, "runtime/system/native-ready.json"); if (File.Exists(path) && new FileInfo(path).Length < 8192) { var ready = JsonNode.Parse(File.ReadAllText(path))!.AsObject(); if (ready["nonce"]?.GetValue<string>() == deployment.Nonce && ready["adapterPid"]?.GetValue<int>() == Environment.ProcessId) { ready["active"] = false; ready["stoppedUtc"] = DateTimeOffset.UtcNow.ToString("o"); StateStore.AtomicWrite(path, ready.ToJsonString(), null); } } } catch (Exception error) { log("independent_native_readiness_close", new { type = error.GetType().Name }); }
         lock(jumpGate)jumpLists.Clear();MediaCardChanged=null;networkPortal.Dispose();networkDetails.Dispose();bluetoothDetails.Dispose();stop.Cancel(); elevatedWindows.Dispose(); taskbar?.RequestStop(); shell.BarReady -= BarReady; shell.InlineImage = null; popups.InlineImage = null;shell.ExtensionState=null; Volatile.Write(ref images, new Dictionary<string, string>());
         Released = Task.Run(async () => {

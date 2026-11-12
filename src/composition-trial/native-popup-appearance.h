@@ -17,7 +17,8 @@ inline void NativePopup::LayoutPreview70()
     if(kind==L"@magic/apps-menu")for(auto const &value:Data().GetNamedArray(L"rows",JsonArray{})){
         auto row=value.GetObject();auto key=Str(row,L"id"),source=Str(row,L"image")+L":"+Str(row,L"iconUmid")+L":"+Str(row,L"imageVersion");
         if(imageSources.contains(key)&&imageSources[key]!=source){auto found=appearanceIcons.values.find(key);if(found!=appearanceIcons.values.end()){appearanceIcons.bytes-=found->second.bytes;appearanceIcons.values.erase(found);appearanceIcons.glyphs.erase(key);}iconRequests.erase(key);}
-        imageSources[key]=source;auto png=Str(row,L"iconPng");
+        if(imageSources.contains(key)&&imageSources[key]!=source)resolvedExecutables.erase(key);
+        imageSources[key]=source;auto resolved=Str(row,L"iconExecutable");if(!resolved.empty())resolvedExecutables[key]=resolved;auto png=Str(row,L"iconPng");
         if(!png.empty()){if(!appearanceIcons.values.contains(key))appearanceIcons.Load(app.graphics,key,png);row.Remove(L"iconPng");}
     }
     appearanceOverflow=appearanceTop=appearanceView=appearanceOffset=0;
@@ -147,9 +148,9 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
         p.Text(Ui(L"用户",L"USER"),{26,19,width-26,37},11.5f,t.Gray(700),600);
         c->FillEllipse({{48,68},22,22},p.Color(t.Accent()));auto name=Str(Account(),L"name");
         p.Text(name.empty()?L"?":name.substr(0,1),{26,46,70,90},17,t.OnAccent(),600,DWRITE_TEXT_ALIGNMENT_CENTER);
-        p.Text(name,{82,48,width-26,68},13.76f,t.Ink(),600);
-        p.Text(Bool(Account(),L"honorSignedIn")?Ui(L"荣耀账号已登录",L"HONOR account signed in"):Ui(L"荣耀账号未登录",L"HONOR account signed out"),
-               {82,70,width-26,88},11.5f,t.MaterialMuted());
+        bool signedIn=Bool(Account(),L"honorSignedIn");
+        p.Text(name,{82,signedIn?48.f:56.f,width-26,signedIn?68.f:82.f},13.76f,t.Ink(),600);
+        if(signedIn)p.Text(Ui(L"荣耀账号已登录",L"HONOR account signed in"),{82,70,width-26,88},11.5f,t.MaterialMuted());
     }else if(kind==L"@magic/power-menu"){
         c->FillEllipse({{48,50},24,24},p.Color(t.Accent()));p.Icon(L"user",{34,36,62,64},t.OnAccent());
         p.Text(Ui(L"再见，",L"Goodbye, ")+Str(Account(),L"name"),{88,28,width-24,52},14,t.Ink(),600);
@@ -173,12 +174,13 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
         if(group.right){group.left-=4;group.right+=4;group.top-=4;group.bottom+=4;p.Fill(group,t.SectionFilm(),16);}
     }
     bool secondary=kind==L"@magic/network-popup"||kind==L"@magic/bluetooth-popup"||kind==L"@magic/media-popup";
-    if(secondary)for(auto const &r:rows)if(r.control==L"toggle"&&r.rect.top==22)p.Toggle(r.rect,r.value>.5,r.enabled);
+    if(secondary)for(auto const &r:rows)if(r.control==L"toggle"&&r.rect.top==22)PaintToggle(p,r,r.rect,true);
     float clipTop=apps?18:calendar||user?10:ContentTop();
     c->PushAxisAlignedClip({14,clipTop,width-14,height-16},D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     if(apps)p.Fill({18,height-58,width-18,height-16},t.SectionFilm(),NativeMetrics::PanelRadius);
     for(int i=0;i<static_cast<int>(rows.size());i++){
         auto const &r=rows[i];if(r.offscreen||PowerView()&&r.id==L"power-refresh"||secondary&&r.control==L"toggle"&&r.rect.top==22)continue;auto rect=r.rect;
+        if(kind==L"@magic/system-tray"){if(!TrayOwnsPixels())PaintTrayItem(c,r,TrayItemRect(i),i==hover);continue;}
         bool active=r.active||r.control==L"toggle"&&r.value>.5;
         bool grid=calendar,quick=kind==L"@magic/quick-settings"&&!PowerView()&&r.control==L"toggle";
         bool tile=apps&&r.id.rfind(L"app:",0)==0||kind==L"@magic/system-tray"||kind==L"@magic/power-menu";
@@ -229,11 +231,13 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
             if(quick&&r.id==L"dark"&&r.value<.5)key=L"brightness";if(quick&&r.id==L"night")key=L"eye";
             if(tile&&apps){auto source=Data().GetNamedArray(L"rows");key=i<static_cast<int>(source.Size())&&Bool(source.GetAt(i).GetObject(),L"folder")?L"folder":L"apps";}if(kind==L"@magic/system-tray")key=L"tray";
             float cx=(rect.left+rect.right)/2,size=quick?30.f:tile&&apps?48.f:24.f;
-            if(!appearanceIcons.Draw(c,r.id,{cx-size/2,rect.top+12,cx+size/2,rect.top+12+size},p.Color(ink)))p.Icon(key,{cx-size/2,rect.top+12,cx+size/2,rect.top+12+size},ink);
+            auto imageRect=D2D1::RectF(cx-size/2,rect.top+12,cx+size/2,rect.top+12+size);bool official=false;
+            if(apps){auto identity=resolvedExecutables.find(r.id);auto asset=identity==resolvedExecutables.end()?nullptr:HonorApplicationPath(identity->second);if(asset){auto scheme=HonorScheme(app.model.preferences);app.honor.Scheme(scheme);official=app.honor.Draw(app.graphics,c,scheme==L"honor-translucent"?asset->translucent:asset->white,imageRect,ink.r>.5f);}}
+            if(!official&&!appearanceIcons.Draw(c,r.id,imageRect,p.Color(ink)))p.Icon(key,imageRect,ink);
             if(kind==L"@magic/system-tray")p.Icon(r.active?L"unpin":L"pin",{rect.right-14,rect.top+2,rect.right-3,rect.top+13},i==hover?t.Ink():t.MaterialMuted());
             if(kind!=L"@magic/system-tray")p.Text(label,{rect.left+6,rect.top+size+18,rect.right-6,rect.bottom-4},12.8f,ink,quick?500:600,DWRITE_TEXT_ALIGNMENT_CENTER,0,true);
         }else if((kind==L"@magic/network-popup"||kind==L"@magic/bluetooth-popup"||kind==L"@magic/media-popup")&&r.control==L"toggle"&&rect.top==22){
-            p.Toggle(rect,r.value>.5,r.enabled);
+            PaintToggle(p,r,rect,true);
         }else if(r.id==L"system-power"||r.id==L"apps-power"){
             p.Icon(L"power",{rect.left+7,rect.top+7,rect.left+25,rect.top+25},ink);
         }else if(kind==L"@magic/quick-settings"&&r.id.rfind(L"mute:",0)==0){
@@ -263,7 +267,7 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
             p.Icon(kind==L"@magic/bluetooth-popup"?L"bluetooth":kind==L"@magic/network-popup"?L"wifi":L"volume",{rect.left+10,cy-10,rect.left+30,cy+10},selected?t.OnAccent():t.MaterialMuted());
             p.Text(label,{rect.left+48,rect.top+2,rect.right-8,r.detail.empty()?rect.bottom:rect.top+25},12.5f,ink,500);
             if(!r.detail.empty())p.Text(r.detail,{rect.left+48,rect.top+25,rect.right-8,rect.bottom-2},10.5f,t.MaterialMuted());
-            if(r.control==L"toggle")p.Toggle({rect.right-46,cy-10,rect.right-6,cy+10},r.value>.5,r.enabled);
+            if(r.control==L"toggle")PaintToggle(p,r,{rect.right-46,cy-10,rect.right-6,cy+10});
         }else{
             float inset=user||kind==L"@magic/keyboard-selector"||kind==L"@magic/task-switcher"?36:10;
             if(kind==L"@magic/task-switcher")appearanceIcons.Draw(c,r.id,{rect.left+6,rect.top+14,rect.left+30,rect.top+38});
@@ -279,7 +283,7 @@ inline void NativePopup::PaintPreview70(ID2D1DeviceContext *c)
             p.Text(label,{rect.left+inset,keyboard?rect.top:rect.top+3,labelRight,headerBottom},12.8f,ink,card||r.active?600:400);
             if(confirmation)p.Text(Ui(L"再次点击确认 · ",L"Click again · ")+std::to_wstring(confirmation),hint,11,t.Danger(),400,DWRITE_TEXT_ALIGNMENT_TRAILING);
             if(!r.detail.empty())p.Text(r.detail,{rect.left+inset,rect.top+27,rect.right-10,rect.bottom-5},12,t.Gray(700),400,DWRITE_TEXT_ALIGNMENT_LEADING,0,true);
-            if(r.control==L"toggle")p.Toggle({rect.right-48,rect.top+8,rect.right-8,rect.top+28},r.value>.5,r.enabled);
+            if(r.control==L"toggle")PaintToggle(p,r,{rect.right-48,rect.top+8,rect.right-8,rect.top+28});
         }
     }
     if(apps){c->FillEllipse({{36,height-36},12,12},p.Color(t.Accent()));p.Text(Str(Account(),L"name"),{58,height-52,150,height-20},12.8f,t.Ink(),600);}
@@ -298,7 +302,7 @@ inline void NativePopup::RequestAppearanceIcons()
     if(!visible||!life||!hwnd||!generic||LocalPicker()||LocalContext()||!iconReady)return;
     JsonArray keys;auto data=Data().GetNamedArray(L"rows");
     for(auto const &v:data){auto item=v.GetObject();auto key=Str(item,L"id"),source=Str(item,L"image"),umid=Str(item,L"iconUmid");if(source.empty()&&umid.empty())continue;source+=L":"+umid+L":"+Str(item,L"imageVersion");
-        if(imageSources.contains(key)&&imageSources[key]!=source){auto found=appearanceIcons.values.find(key);if(found!=appearanceIcons.values.end()){appearanceIcons.bytes-=found->second.bytes;appearanceIcons.values.erase(found);appearanceIcons.glyphs.erase(key);}iconRequests.erase(key);}imageSources[key]=source;
+        if(imageSources.contains(key)&&imageSources[key]!=source){auto found=appearanceIcons.values.find(key);if(found!=appearanceIcons.values.end()){appearanceIcons.bytes-=found->second.bytes;appearanceIcons.values.erase(found);appearanceIcons.glyphs.erase(key);}iconRequests.erase(key);resolvedExecutables.erase(key);}imageSources[key]=source;
     }
     for(auto const &r:rows)if(!r.offscreen&&!appearanceIcons.values.contains(r.id)&&!iconRequests.contains(r.id)){
         bool image=false;for(auto const &v:data)if(Str(v.GetObject(),L"id")==r.id&&(!Str(v.GetObject(),L"image").empty()||!Str(v.GetObject(),L"iconUmid").empty())){image=true;break;}
@@ -306,7 +310,7 @@ inline void NativePopup::RequestAppearanceIcons()
     }
     if(!keys.Size())return;JsonObject request;Put(request,L"op",std::wstring(L"popup-icons"));Put(request,L"token",token);request.Insert(L"keys",keys);
     auto owner=life;app.Request(request,[owner](JsonObject const &reply){auto popup=owner->owner;if(!popup||!popup->visible||!Bool(reply,L"ok"))return;
-        for(auto const &v:reply.GetNamedObject(L"result").GetNamedArray(L"icons")){auto item=v.GetObject();bool glyph=false;for(auto const &row:popup->Data().GetNamedArray(L"rows"))if(Str(row.GetObject(),L"id")==Str(item,L"key")){glyph=Bool(row.GetObject(),L"glyph");break;}popup->appearanceIcons.Load(popup->app.graphics,Str(item,L"key"),Str(item,L"png"),glyph);}
+        for(auto const &v:reply.GetNamedObject(L"result").GetNamedArray(L"icons")){auto item=v.GetObject();auto resolved=Str(item,L"iconExecutable");if(!resolved.empty()&&resolved.size()<=32768)popup->resolvedExecutables[Str(item,L"key")]=resolved;bool glyph=false;for(auto const &row:popup->Data().GetNamedArray(L"rows"))if(Str(row.GetObject(),L"id")==Str(item,L"key")){glyph=Bool(row.GetObject(),L"glyph");break;}popup->appearanceIcons.Load(popup->app.graphics,Str(item,L"key"),Str(item,L"png"),glyph);}
         popup->Draw();popup->RequestAppearanceIcons();
     });
 }

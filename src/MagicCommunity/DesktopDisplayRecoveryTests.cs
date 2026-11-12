@@ -32,6 +32,144 @@ internal static class DesktopDisplayRecoveryTests
         void Valid(LayoutState state) { StateStore.Validate(state); foreach (var b in state.Boards.Where(b => b.Grid is not null)) Expect(DesktopGridActions.Expected(b).Count == DesktopPages.Grids(b).Sum(g => g.Placements.Count) + b.Unplaced.Count, "Content lost"); }
         File.WriteAllText(Path.Combine(folder, "source.txt"), "original bytes"); File.WriteAllText(Path.Combine(folder, "nested.txt"), "nested bytes");
 
+        foreach (bool restart in new[] { false, true })
+            Check("external-only-primary-resume-retains-content-after-missing-edid-and-connector-change-restart-" + restart, () => {
+                var state = Fixture(); var board = state.Boards[1];
+                board.IconGrid = new() { Columns = board.Grid!.Columns, Rows = board.Grid.Rows, RefWidth = 1920, RefHeight = 1080 };
+                board.SortSettings = new() { Mode = "custom" };
+                board.Paged = true; DesktopPages.Add(board, false);
+                var expected = StateStore.Copy(state).Boards[1];
+                var external = secondary with { Primary = true, Label = "主屏", Device = "DISPLAY2" };
+                DesktopDisplayRecovery.Reconcile(state, [external]); // Windows: show only on display 2.
+                for (int cycle = 0; cycle < 3; cycle++) {
+                    DesktopDisplayRecovery.Reconcile(state, []);
+                    DesktopDisplayRecovery.Reconcile(state, [external with { HardwareIdentity = "", Dpi = 0, Device = "DISPLAY1" }]);
+                    if (restart) {
+                        var store = new StateStore(Path.Combine(folder, "external-resume-" + cycle));
+                        store.Save(state); state = store.Load();
+                    }
+                    external = external with { Id = "external-resumed-" + cycle, Device = "DISPLAY1", Dpi = 144 };
+                    DesktopDisplayRecovery.Reconcile(state, [external]);
+                    expected.Id = external.Id;
+                    Expect(state.Boards.Count == 2 && !DesktopDisplayRecovery.Offline(state, [external]).Any(), "External primary content was stranded in offline recovery");
+                    Expect(JsonSerializer.Serialize(state.Boards.Single(b => b.Id == external.Id), StateStore.Json) == JsonSerializer.Serialize(expected, StateStore.Json), "External primary pages, files, cards or custom layout changed");
+                    Valid(state);
+                }
+                Expect(File.ReadAllText(Path.Combine(folder, "source.txt")) == "original bytes" && File.ReadAllText(Path.Combine(folder, "nested.txt")) == "nested bytes", "Resume changed file bytes");
+            });
+
+        Check("late-edid-rejoins-unmodified-empty-primary-after-save-and-restart", () => {
+            var state = Fixture(); var expected = StateStore.Copy(state).Boards[1];
+            var pending = secondary with { Id = "external-pending", Primary = true, HardwareIdentity = "" };
+            DesktopDisplayRecovery.Reconcile(state, [pending]);
+            var empty = state.Boards.Single(b => b.Id == pending.Id);
+            DesktopDisplayRecovery.Pack(empty, pending, []); // The renderer has already initialized an empty page.
+            var store = new StateStore(Path.Combine(folder, "late-edid")); store.Save(state); state = store.Load();
+            var verified = pending with { HardwareIdentity = secondary.HardwareIdentity };
+            DesktopDisplayRecovery.Reconcile(state, [verified]); expected.Id = verified.Id;
+            Expect(state.Boards.Count == 2 && !DesktopDisplayRecovery.Offline(state, [verified]).Any(), "Late EDID left the external primary content in recovery");
+            Expect(JsonSerializer.Serialize(state.Boards.Single(b => b.Id == verified.Id), StateStore.Json) == JsonSerializer.Serialize(expected, StateStore.Json), "Late EDID changed saved primary layout");
+            Valid(state);
+        });
+        foreach (string edit in new[] { "file", "empty-folder", "card", "page", "grid", "sort", "name", "duplicate-identity" })
+            Check("late-edid-never-overwrites-active-layout-" + edit, () => {
+                var state = Fixture(); var pending = secondary with { Id = "external-pending", Primary = true, HardwareIdentity = "" };
+                DesktopDisplayRecovery.Reconcile(state, [pending]); var board = state.Boards.Single(b => b.Id == pending.Id);
+                DesktopDisplayRecovery.Pack(board, pending, []);
+                switch (edit) {
+                    case "file": board.RootItems.Add(new() { Name = "new-owned", Target = Path.Combine(folder, "new-owned") }); break;
+                    case "empty-folder": board.Boxes.Add(new() { Name = "keep-empty" }); break;
+                    case "card": board.Cards = [new() { Type = "system.clock", Columns = 2, Rows = 2 }]; break;
+                    case "page": board.Paged = true; DesktopPages.Add(board, false); break;
+                    case "grid": board.IconGrid = new() { Columns = board.Grid!.Columns, Rows = board.Grid.Rows, RefWidth = 1920, RefHeight = 1080 }; break;
+                    case "sort": board.SortSettings = new() { Mode = "custom" }; break;
+                    case "name": board.Name = "user name"; break;
+                    case "duplicate-identity": state.Displays!.Single(m => m.Id == "a").Hardware = secondary.HardwareIdentity; break;
+                }
+                DesktopGridActions.ReconcileBoard(board); string before = JsonSerializer.Serialize(board, StateStore.Json);
+                DesktopDisplayRecovery.Reconcile(state, [pending with { HardwareIdentity = secondary.HardwareIdentity }]);
+                Expect(state.Boards.Count == 3 && JsonSerializer.Serialize(state.Boards.Single(b => b.Id == pending.Id), StateStore.Json) == before && state.Boards.Any(b => b.Id == "b"), "Late identity overwrote an edited or ambiguous board");
+                Valid(state);
+            });
+
+        Check("disabled-internal-panel-does-not-supply-active-monitor-identity", () => {
+            var devices = new (string Id, uint Flags)[] { ("internal-disabled", 0), ("external-active", 1) };
+            int reads = 0;
+            var id = Displays.ReadActiveIdentity(i => { reads++; return i < devices.Length ? devices[i] : null; });
+            Expect(id == "external-active" && reads == 2, "Disabled index zero was mistaken for the external screen");
+            Array.Reverse(devices);
+            Expect(Displays.ReadActiveIdentity(i => i < devices.Length ? devices[i] : null) == id, "Enumeration order changed active identity");
+        });
+        Check("missing-active-identity-defers-instead-of-using-disabled-panel", () => {
+            Expect(Displays.ReadActiveIdentity(i => i == 0 ? ("internal-disabled", 0U) : null) is null, "Inactive panel used as fallback");
+            Expect(Displays.ReadActiveIdentity(i => i == 0 ? ("", 1U) : ("internal-disabled", 0U)) is null, "Blank active identity used a different monitor");
+            int reads = 0;
+            Expect(Displays.ReadActiveIdentity(i => { reads++; return ("disabled", 0U); }) is null && reads == 64, "Malformed enumeration was unbounded");
+            Expect(Displays.ReadActiveIdentity(i => i == 0 ? ("clone-first-active", 1U) : ("clone-second-active", 1U)) == "clone-first-active", "Clone view changed the Windows monitor order");
+        });
+        Check("incomplete-resume-snapshots-retain-previous-topology-and-layout", () => {
+            var state = Fixture(); string before = JsonSerializer.Serialize(state, StateStore.Json);
+            IReadOnlyList<Display> accepted = [primary, secondary];
+            IReadOnlyList<Display>[] incomplete = [[], [primary, secondary with { Id = "temporary:DISPLAY2" }],
+                [primary, secondary with { Id = "A" }], [primary, secondary with { Primary = true }],
+                [secondary], [primary with { Width = 0 }]];
+            foreach (var snapshot in incomplete) {
+                if (Displays.CanReconcile(snapshot)) { DesktopDisplayRecovery.Reconcile(state, snapshot); accepted = snapshot; }
+                Expect(JsonSerializer.Serialize(state, StateStore.Json) == before && accepted.Count == 2 && accepted[0] == primary, "Partial wake topology changed the accepted layout");
+            }
+            Expect(Displays.CanReconcile([secondary with { Primary = true }]), "External-only topology rejected");
+            Expect(Displays.CanReconcile([secondary with { Primary = true }, primary with { Primary = false }]), "Primary role switch rejected");
+        });
+        Check("external-primary-recovery-does-not-adopt-disabled-internal-content", () => {
+            var state = Fixture(); var internalBoard = state.Boards[0];
+            internalBoard.RootItems.Add(new() { Name = "laptop-only", Target = Path.Combine(folder, "laptop-only") });
+            DesktopGridActions.ReconcileBoard(internalBoard);
+            string internalBefore = JsonSerializer.Serialize(internalBoard, StateStore.Json), externalPages = Anchors(state.Boards[1]);
+            var external = secondary with { Primary = true };
+            DesktopDisplayRecovery.Reconcile(state, [external]);
+            DesktopDisplayRecovery.Reconcile(state, []);
+            DesktopDisplayRecovery.Reconcile(state, [external with { HardwareIdentity = "" }]);
+            external = external with { Id = "external-reconnected" };
+            DesktopDisplayRecovery.Reconcile(state, [external]);
+            Expect(DesktopDisplayRecovery.Offline(state, [external]).Single().Id == primary.Id, "Current external primary was treated as the offline panel");
+            Expect(JsonSerializer.Serialize(internalBoard, StateStore.Json) == internalBefore && Anchors(state.Boards.Single(b => b.Id == external.Id)) == externalPages, "Primary role swap transferred content between monitors");
+            Valid(state);
+        });
+        Check("same-interface-missing-edid-preserves-both-primary-role-directions", () => {
+            foreach (bool wasPrimary in new[] { false, true }) {
+                var state = Fixture(); var board = state.Boards[1]; string before = JsonSerializer.Serialize(board, StateStore.Json);
+                DesktopDisplayRecovery.Reconcile(state, [primary with { Primary = !wasPrimary }, secondary with { Primary = wasPrimary }]);
+                DesktopDisplayRecovery.Reconcile(state, []);
+                DesktopDisplayRecovery.Reconcile(state, [primary with { Primary = wasPrimary }, secondary with { Primary = !wasPrimary, HardwareIdentity = "" }]);
+                Expect(JsonSerializer.Serialize(board, StateStore.Json) == before && state.Displays!.Single(m => m.Id == "b").Hardware == "hardware-b", "Role switch or missing EDID reset the saved layout/identity");
+                Valid(state);
+            }
+        });
+        Check("same-interface-without-serial-from-first-use-retains-external-primary-layout", () => {
+            var state = Fixture(); var board = state.Boards[1]; string before = JsonSerializer.Serialize(board, StateStore.Json);
+            state.Displays!.Single(m => m.Id == "b").Hardware = "";
+            DesktopDisplayRecovery.Reconcile(state, []);
+            DesktopDisplayRecovery.Reconcile(state, [secondary with { Primary = true, HardwareIdentity = "" }]);
+            Expect(JsonSerializer.Serialize(board, StateStore.Json) == before && !DesktopDisplayRecovery.Offline(state, [secondary]).Any(), "Monitor without a serial lost its stable-interface layout");
+            Valid(state);
+        });
+        Check("interface-case-change-without-edid-does-not-create-empty-primary", () => {
+            var state = Fixture(); var expected = StateStore.Copy(state).Boards[1]; expected.Id = "B";
+            var external = secondary with { Id = "B", Primary = true, HardwareIdentity = "" };
+            DesktopDisplayRecovery.Reconcile(state, [external]);
+            Expect(state.Boards.Count == 2 && !DesktopDisplayRecovery.Offline(state, [external]).Any() &&
+                JsonSerializer.Serialize(state.Boards.Single(b => b.Id == "B"), StateStore.Json) == JsonSerializer.Serialize(expected, StateStore.Json), "Interface casing stranded a layout");
+            Valid(state);
+        });
+        Check("unidentified-replacement-does-not-inherit-old-edid", () => {
+            var state = Disconnected();
+            DesktopDisplayRecovery.Reconcile(state, [primary, Screen("c", hardware: "")]);
+            Expect(state.Displays!.Single(m => m.Id == "c").Hardware == "", "Replacement inherited the previous physical monitor's hash");
+            DesktopDisplayRecovery.Reconcile(state, [primary with { Primary = false }, Screen("other", true)]);
+            Expect(state.Boards.Any(b => b.Id == "c") && state.Boards.Single(b => b.Id == "other").RootItems.Count == 0, "Unknown replacement was rematched using stale EDID");
+            Valid(state);
+        });
+
         Check("new-displays-have-no-generated-default-folders-after-five-cycles", () => {
             var state = new LayoutState();
             for (int i = 0; i < 5; i++) {
@@ -59,8 +197,14 @@ internal static class DesktopDisplayRecoveryTests
         });
         Check("disconnect-retains-all-pages-and-reference-bytes", () => { var s = Fixture(); string before = Anchors(s.Boards[1]); DesktopDisplayRecovery.Reconcile(s, [primary]); Expect(Anchors(s.Boards[1]) == before && DesktopDisplayRecovery.Offline(s, [primary]).Count() == 1, "Disconnect moved content"); Valid(s); });
         Check("same-hardware-resolution-dpi-restores-exact-anchors", () => { var s = Disconnected(); string before = Anchors(s.Boards[1]); DesktopDisplayRecovery.Reconcile(s, [primary, secondary]); Expect(Anchors(s.Boards[1]) == before && !DesktopDisplayRecovery.Offline(s, [primary, secondary]).Any(), "Exact restore changed anchors"); Valid(s); });
-        foreach (var target in new[] { secondary with { HardwareIdentity = "new-monitor" }, secondary with { HardwareIdentity = "" } })
-            Check("changed-identity-or-projection-defaults-" + target.HardwareIdentity + "-" + target.Dpi + "-" + target.PixelWidth, () => { var s = Disconnected(); var key = DesktopGridActions.ItemKey(s.Boards[1].RootItems[0]); DesktopDisplayRecovery.Reconcile(s, [primary, target]); Expect(DesktopPages.Position(s.Boards[1], key) != new GridRect(7, 5, 1, 1), "Changed display restored stale anchor"); Valid(s); });
+        Check("confirmed-hardware-replacement-still-uses-default-order", () => { var s = Disconnected(); var key = DesktopGridActions.ItemKey(s.Boards[1].RootItems[0]); DesktopDisplayRecovery.Reconcile(s, [primary, secondary with { HardwareIdentity = "new-monitor" }]); Expect(DesktopPages.Position(s.Boards[1], key) != new GridRect(7, 5, 1, 1), "Changed display restored stale anchor"); Valid(s); });
+        Check("confirmed-primary-hardware-replacement-does-not-use-primary-role-as-identity", () => {
+            var state = Fixture(); var board = state.Boards[1]; var key = DesktopGridActions.ItemKey(board.RootItems[0]);
+            DesktopDisplayRecovery.Reconcile(state, [secondary with { Primary = true }]);
+            DesktopDisplayRecovery.Reconcile(state, [secondary with { Primary = true, HardwareIdentity = "confirmed-replacement" }]);
+            Expect(DesktopPages.Position(board, key) != new GridRect(7, 5, 1, 1) && state.Displays!.Single(m => m.Id == "b").Hardware == "confirmed-replacement", "Primary role concealed a known hardware replacement");
+            Valid(state);
+        });
         foreach(var target in new[]{secondary with{Dpi=144},secondary with{Dpi=0},secondary with{PixelWidth=2560}})
             Check("same-hardware-projection-change-preserves-pages-"+target.Dpi+"-"+target.PixelWidth,()=>{var state=Disconnected();string before=JsonSerializer.Serialize(state.Boards[1],StateStore.Json);DesktopDisplayRecovery.Reconcile(state,[primary,target]);Expect(JsonSerializer.Serialize(state.Boards[1],StateStore.Json)==before,"Same monitor geometry repacked layout");Valid(state);});
         Check("three-primary-resume-cycles-retain-pages-icons-cards-and-custom-grid",()=>{

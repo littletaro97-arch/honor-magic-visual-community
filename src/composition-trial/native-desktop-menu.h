@@ -117,15 +117,20 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
       : app(w.app), owner(w.hwnd), board(w.boardId), point(p) {
     POINT client=p;ScreenToClient(w.hwnd,&client);auto b=app.model.Find(board);
     if(b)cell={static_cast<LONG>(std::floor((client.x*96/w.dpi-b->originX)/b->stepX)),static_cast<LONG>(std::floor((client.y*96/w.dpi-b->originY)/b->stepY))};
+    requestId=NewRequestId();
+    for (auto const &key : w.selected)
+      keys.Append(::Text(key));
+  }
+  static std::wstring NewRequestId(){
+    std::wstring id;
     GUID guid{};
     check_hresult(CoCreateGuid(&guid));
     wchar_t text[40];
     StringFromGUID2(guid, text, 40);
     for (wchar_t c : std::wstring(text))
       if (iswxdigit(c))
-        requestId += c;
-    for (auto const &key : w.selected)
-      keys.Append(::Text(key));
+        id += c;
+    return id;
   }
   Window *WindowNow() {
     for (auto const &w : app.windows)
@@ -253,7 +258,7 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
         rows.Append(Row(L"clock-weight-header",L"字重",L"",false,L"header"));
         for(auto value:{300,900}){auto row=Row(L"weight:"+std::to_wstring(value),value==300?L"细体":L"粗体",L"clock");row.Insert(L"checked",JsonValue::CreateBooleanValue((weight==300?300:900)==value));rows.Append(row);}
       }
-      if (type == L"system.storage")
+      if (type == L"system.storage" && app.model.honorSignedIn)
         rows.Append(Row(L"card-cleanup", L"打开管家清理", L"storage"));
       if (type == L"system.clipboard-image") {
         rows.Append(Row(L"image-copy", L"复制图片", L"copy", static_cast<bool>(app.clipboardBitmap)));
@@ -261,12 +266,14 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
         rows.Append(Row(L"image-clear", L"清除剪贴板", L"delete"));
       }
       if (type == L"system.weather") {
+        bool hourly=Str(tile->card.GetNamedObject(L"settings",JsonObject{}),L"forecastView")==L"hourly";
+        for(bool today:{false,true}){auto row=Row(today?L"weather-view:hourly":L"weather-view:daily",today?L"今日天气":L"多日天气",today?L"clock":L"calendar");row.Insert(L"checked",JsonValue::CreateBooleanValue(today==hourly));rows.Append(row);}
         rows.Append(Row(L"weather-refresh", L"立即刷新", L"refresh"));
         rows.Append(Row(L"weather-city", L"设置城市…", L"location"));
         rows.Append(Row(L"weather-info", L"定位信息", L"info"));
       }
       if(type==L"system.handoff"){rows.Append(Row(L"handoff-edit",L"编辑交接内容",L"edit"));rows.Append(Row(L"handoff-text",L"仅复制文本",L"copy"));}
-      if(type==L"system.honor-service"){rows.Append(Row(L"honor-refresh",L"刷新服务状态",L"refresh"));rows.Append(Row(L"honor-restore",L"全部恢复",L"undo"));}
+      if(type==L"system.honor-service"&&app.model.honorSignedIn){rows.Append(Row(L"honor-refresh",L"刷新服务状态",L"refresh"));rows.Append(Row(L"honor-restore",L"全部恢复",L"undo"));}
       if(type==L"system.todo"||type==L"system.week"){
         auto state=NativeTodoData(*w,*tile);bool completed=Bool(state,L"hasCompleted"),undo=Bool(state,L"canUndo");
         if(type==L"system.week")rows.Append(Row(L"todo-today",L"回到今天",L"calendar"));
@@ -287,6 +294,7 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
       rows.Append(Row(L"card-remove", L"移除卡片", L"delete",true,L"danger"));
     } else if (tile && !tile->folder.empty()) {
       rows.Append(Row(L"folder-open", L"打开", L"open"));
+      rows.Append(Row(L"folder-count",tile->showItemCount?L"隐藏文件数量标识":L"显示文件数量标识",L"info"));
       rows.Append(Row(L"rename", L"重命名\tF2", L"rename"));
       rows.Append(Row(L"size:2:2", L"2 行 × 2 列", L"resize"));
       rows.Append(Row(L"size:4:2", L"2 行 × 4 列", L"resize"));
@@ -352,6 +360,20 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
     }
     return out;
   }
+  void EnsureDesktopCommands(JsonArray &rows) {
+    if(keys.Size()!=0)return;
+    auto ensure=[&](std::wstring key,std::wstring label,std::wstring icon,std::wstring control=L""){
+      for(auto const &value:rows){
+        auto entry=shellEntries.find(Str(value.GetObject(),L"id"));
+        if(entry!=shellEntries.end()&&Str(entry->second,L"key")==key)return;
+      }
+      rows.Append(Row(L"desktop-"+key,label,icon,true,control));
+    };
+    ensure(L"refresh",L"刷新(E)",L"refresh");
+    ensure(L"new",L"新建(W)",L"new",L"submenu");
+    ensure(L"display",L"显示设置(D)",L"display");
+    ensure(L"personalize",L"个性化(R)",L"settings");
+  }
   void Root() {
     auto w = WindowNow();
     if (!w) {
@@ -377,13 +399,17 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
         return;
       if(self->app.inputEpoch!=epoch||GetForegroundWindow()!=foreground){self->Cancel();return;}
       JsonArray rows;
-      if (Bool(reply, L"ok")){
-        auto result=reply.GetNamedObject(L"result");
+      auto result=self->ReadFullReply(reply);
+      bool loaded=result&&!Bool(result,L"cancelled");
+      if (loaded){
         rows = self->Compact(result.GetNamedArray(L"compact"));
         self->moreEntries=result.GetNamedArray(L"more");self->optimized=Bool(result,L"optimizedFile");
       }
-      else
+      self->EnsureDesktopCommands(rows);
+      if(!loaded){
+        self->optimized=true; // Explicit More gets its own read even if the initial query failed.
         rows.Append(Row(L"retry", L"重试读取 Windows 菜单", L"refresh"));
+      }
       if (!self->automatic.empty())
         for (auto const &v : rows) {
           auto row = v.GetObject();
@@ -404,10 +430,10 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
       // More; completion must never resize or reorder the menu under a pointer.
       // The first page's command table stays valid while this independent query
       // runs. A failed speculative query is silent and an explicit click retries.
-      if(self->optimized){
+      if(self->optimized&&loaded){
         self->prefetchPending=true;
-        self->Request(L"prefetch",{},[self](JsonObject const &reply){
-          if(!self->live)return;
+        self->Request(L"prefetch",{},[self,lease=self->requestId](JsonObject const &reply){
+          if(!self->live||self->requestId!=lease)return;
           self->prefetchPending=false;
           self->readyFull=self->ReadFullReply(reply);
           if(self->fullLoading&&self->fullNavigation==self->navigation){
@@ -423,7 +449,7 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
     auto payload=reply.TryLookup(L"result");
     if(!payload||payload.ValueType()!=JsonValueType::Object)return nullptr;
     auto result=payload.GetObject();
-    if(Str(result,L"requestId")!=requestId)return nullptr;
+    if(Str(result,L"requestId")!=requestId||Bool(result,L"cancelled"))return nullptr;
     for(auto key:{L"compact",L"more"}){
       auto value=result.TryLookup(key);
       if(!value||value.ValueType()!=JsonValueType::Array)return nullptr;
@@ -490,9 +516,25 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
       Close();if(physical)Request(L"dismiss");JsonObject r;Put(r,L"op",std::wstring(L"desktop-sort"));Put(r,L"board",board);Put(r,L"mode",mode);r.Insert(L"descending",JsonValue::CreateBooleanValue(descending));app.Request(r);return;
     }
     if (id == L"retry") {
-      ResetPreparedChildren();
+      Request(L"dismiss");
+      requestId=NewRequestId();
+      readyFull=nullptr;prefetchPending=false;optimized=false;ResetPreparedChildren();shellEntries.clear();moreEntries=JsonArray{};
       Root();
       return;
+    }
+    if(id==L"desktop-new"){
+      parents.push_back({entries,path});JsonArray rows;
+      rows.Append(Row(L"desktop-create-folder",L"文件夹",L"folder"));rows.Append(Row(L"desktop-create-text",L"文本文档",L"document"));Display(rows);return;
+    }
+    if(id==L"desktop-create-folder"||id==L"desktop-create-text"){
+      Close();Request(L"dismiss");JsonObject r;Put(r,L"op",std::wstring(L"desktop-create"));Put(r,L"board",board);
+      Put(r,L"action",std::wstring(id==L"desktop-create-folder"?L"folder":L"text"));Put(r,L"x",static_cast<double>(cell.x));Put(r,L"y",static_cast<double>(cell.y));app.Request(r);return;
+    }
+    if(id==L"desktop-refresh"||id==L"desktop-display"||id==L"desktop-personalize"){
+      if(id!=L"desktop-refresh"){AllowSetForegroundWindow(app.parent);SetWindowPos(w->hwnd,HWND_BOTTOM,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}
+      Close();Request(L"dismiss");JsonObject r;
+      Put(r,L"op",std::wstring(L"desktop-action"));Put(r,L"board",board);
+      Put(r,L"kind",std::wstring(id==L"desktop-refresh"?L"refresh":id==L"desktop-display"?L"display":L"personalize"));app.Request(r);return;
     }
     if (id == L"back") {
       if (parents.empty()) {
@@ -732,7 +774,10 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
       }
       Put(r, L"op", std::wstring(L"card-action"));
       Put(r, L"cardId", Str(tile->card, L"id"));
-      if (id.rfind(L"font:", 0) == 0 || id.rfind(L"weight:",0)==0) {
+      if((id==L"weather-view:hourly"||id==L"weather-view:daily") && Str(tile->card,L"type")==L"system.weather"){
+        Put(r,L"kind",std::wstring(L"configure"));auto settings=JsonObject::Parse(tile->card.GetNamedObject(L"settings",JsonObject{}).Stringify());
+        Put(settings,L"forecastView",id.substr(13));r.Insert(L"settings",settings);w->weatherHourPages.erase(tile->key);
+      } else if (id.rfind(L"font:", 0) == 0 || id.rfind(L"weight:",0)==0) {
         Put(r, L"kind", std::wstring(L"configure"));
         auto settings = tile->card.GetNamedObject(L"settings");
         bool weight=id.rfind(L"weight:",0)==0;
@@ -751,8 +796,9 @@ struct NativeDesktopMenu : std::enable_shared_from_this<NativeDesktopMenu> {
       Put(r, L"op", std::wstring(L"folder-action"));
       Put(r, L"folderId", tile->folder);
       Put(r, L"kind",
-          std::wstring(id == L"folder-dissolve" ? L"dissolve" : L"resize"));
-      if (id != L"folder-dissolve") {
+          std::wstring(id == L"folder-dissolve" ? L"dissolve" : id==L"folder-count"?L"folder-count":L"resize"));
+      if(id==L"folder-count")r.Insert(L"show",JsonValue::CreateBooleanValue(!tile->showItemCount));
+      else if (id != L"folder-dissolve") {
         Put(r, L"columns", static_cast<double>(_wtoi(id.substr(5).c_str())));
         Put(r, L"rows",
             static_cast<double>(

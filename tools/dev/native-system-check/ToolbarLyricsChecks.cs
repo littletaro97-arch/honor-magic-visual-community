@@ -81,6 +81,28 @@ internal static class ToolbarLyricsChecks
         var view=JsonNode.Parse("""{"monitors":[{"toolbar":true}],"toolbar":{"left":[],"center":[{"nativeModule":"magic.music","playing":true}],"right":[]}}""")!.AsObject();
         using(var service=new NativeToolbarLyrics(()=>{},clock,(_,_)=>Task.FromResult(Lines())))
         {service.Project(view,Media());clock.Advance(350);await Until(()=>service.Text=="first");service.Project(view,Media());Check("projection-carries-display-text-only",view["toolbar"]!["center"]![0]!["lyricsText"]!.GetValue<string>()=="first");view["toolbar"]!["center"]![0]!["playing"]=false;service.Project(view,Media(status:5));Check("paused-music-hides-lyric",view["toolbar"]!["center"]![0]!["lyricsText"]!.GetValue<string>()==""&&clock.Active==0);}
+        var projection=new NativeMusicCardProjection();var timeline=Media(position:1500);long utc=clock.GetUtcNow().ToUnixTimeMilliseconds();
+        var card=projection.Project(timeline,"second",1000,utc);
+        Check("card-current-session-matches-toolbar",card["id"]!.GetValue<string>()=="session"&&card["lyricsText"]!.GetValue<string>()=="second");
+        var lyricOnly=projection.Project(timeline,"fourth",2500,utc+1500);
+        Check("card-lyric-change-retains-position-anchor",lyricOnly["positionMs"]!.GetValue<double>()==1500&&lyricOnly["observedTick"]!.GetValue<long>()==1000);
+        var paused=projection.Project(Media(position:3000,status:5),"fourth",3000,utc);
+        Check("card-paused-hides-lyrics",paused["lyricsText"]!.GetValue<string>()==""&&paused["positionMs"]!.GetValue<double>()==3000);
+        var empty=projection.Project(default,"stale",4000,utc);Check("card-no-session-clears-stale-track",!empty["hasSession"]!.GetValue<bool>()&&empty["lyricsText"]!.GetValue<string>()=="");
+        var onlyCard=JsonNode.Parse("""{"monitors":[],"toolbar":{"left":[],"center":[],"right":[]}}""")!.AsObject();
+        int cardRequests=0;using(var service=new NativeToolbarLyrics(()=>{},clock,(_,_)=>{cardRequests++;return Task.FromResult(Lines());})){
+            var state=Media();service.Project(onlyCard,state,true);clock.Advance(350);await Until(()=>service.Text=="first");
+            service.Project(view,state,true);service.Project(view,state,true);Check("card-and-toolbar-share-one-lookup",cardRequests==1);
+            service.Project(onlyCard,state,true);Check("card-only-retains-shared-service",service.Text=="first"&&clock.Active==1);
+            service.Project(onlyCard,state,false);Check("last-consumer-removal-releases-service",service.Text==""&&clock.Active==0);
+        }
+        foreach(bool offline in new[]{false,true}){
+            int notices=0;using var service=new NativeToolbarLyrics(()=>Interlocked.Increment(ref notices),clock,(_,_)=>offline?Task.FromException<NativeToolbarLyrics.Line[]>(new HttpRequestException("fixture")):Task.FromResult<NativeToolbarLyrics.Line[]>([]));
+            var row=view["toolbar"]!["center"]![0]!;row["playing"]=true;row["label"]="Known song";row["artist"]="Known artist";
+            service.Project(view,Media());Check("lookup-state-visible-"+offline,row["lyricsStatus"]!.GetValue<string>()=="loading");clock.Advance(350);await Until(()=>notices>0);service.Project(view,Media());
+            Check("missing-and-offline-distinct-"+offline,row["lyricsStatus"]!.GetValue<string>()==(offline?"error":"missing"));
+            Check("recognized-track-retained-without-lyrics-"+offline,row["label"]!.GetValue<string>()=="Known song"&&row["tooltip"]!.GetValue<string>().Contains("Known artist")&&clock.Active==0);
+        }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         File.WriteAllText(output,JsonSerializer.Serialize(new{allPass=checks.Values.All(x=>x),scope="Owned media snapshots, fake time and HTTP responses; no live playback or network access",checks},new JsonSerializerOptions{WriteIndented=true}));
     }

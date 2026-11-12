@@ -20,6 +20,7 @@ static void trace_guard(const wchar_t *phase,int code,HWND view,DWORD host) {
     DWORD written;if(size>0)WriteFile(file,line,(DWORD)size,&written,NULL);CloseHandle(file);
 }
 static HWND original, views[64];
+static HWND shownDesktopOwner;
 static DWORD explorerPid, guardHostPid, threadId;
 static int viewCount, originallyVisible, layerQueued;
 #define CHECK_LAYER (WM_APP+1)
@@ -45,6 +46,26 @@ static int application_window(HWND hwnd,HWND foreground) {
         !wcscmp(cls,L"Shell_TrayWnd")||!wcscmp(cls,L"Shell_SecondaryTrayWnd")))return 0;
     return 1;
 }
+/* Win+D raises Explorer's desktop over windows without WS_MINIMIZEBOX. That
+   ordering is intentional, not an inversion. Remember only a foreground
+   transition to our verified Explorer owner; clicking a Magic desktop alone
+   must not suppress the late Settings/uncloak repair. No shortcut interception,
+   game messages, timer or foreground stealing is needed. */
+static void observe_desktop_foreground(HWND foreground) {
+    HWND desktopOwner=GetAncestor(original,GA_ROOT);
+    DWORD pid=0;GetWindowThreadProcessId(desktopOwner,&pid);
+    if(!desktopOwner||pid!=explorerPid){shownDesktopOwner=NULL;return;}
+    HWND shell=GetShellWindow();DWORD shellPid=0;GetWindowThreadProcessId(shell,&shellPid);
+    if(foreground==desktopOwner||(shell&&foreground==shell&&shellPid==explorerPid)){
+        shownDesktopOwner=desktopOwner;return;
+    }
+    if(!foreground)return; /* A transient null foreground is not an app switch. */
+    for(int i=0;i<viewCount;i++)if(foreground==views[i]) {
+        GetWindowThreadProcessId(foreground,&pid);
+        if(pid==guardHostPid&&GetParent(foreground)==desktopOwner)return;
+    }
+    shownDesktopOwner=NULL;
+}
 static int lower_surfaces(void) {
     HWND desktopOwner=GetAncestor(original,GA_ROOT);
     HWND foreground=GetAncestor(GetForegroundWindow(),GA_ROOT);
@@ -53,6 +74,8 @@ static int lower_surfaces(void) {
         DWORD pid=0;GetWindowThreadProcessId(views[i],&pid);
         if(!IsWindow(views[i])||pid!=guardHostPid||GetParent(views[i])!=desktopOwner)return 0;
     }
+    observe_desktop_foreground(foreground);
+    if(shownDesktopOwner==desktopOwner)return 1;
     /* A changing GetWindow chain can cycle. One shared budget bounds the entire
        event, including multimonitor views; partial scans never prove absence.
        No calls into a game's window procedure, activation or periodic polling. */
@@ -104,7 +127,11 @@ static void restore(void) {
 }
 static void CALLBACK changed(HWINEVENTHOOK hook,DWORD event,HWND hwnd,LONG object,LONG child,DWORD eventThread,DWORD time) {
     (void)hook;(void)eventThread;(void)time;
-    if(event==EVENT_SYSTEM_FOREGROUND){queue_layer();return;}
+    if(event==EVENT_SYSTEM_FOREGROUND){
+        /* Capture the transition before the coalesced check: focus may already
+           have moved from Explorer to one of our desktop views by then. */
+        observe_desktop_foreground(GetAncestor(hwnd,GA_ROOT));queue_layer();return;
+    }
     /* Top-level Z-order changes are reported on the desktop's CLIENT object,
        not necessarily on either reordered window. Settings can activate while
        still cloaked and be reordered again after its frame is revealed. */

@@ -48,6 +48,7 @@ internal sealed class NativeHonorServices : IDisposable
         return new{index=row.Index,id=e.Id,name=e.Name,group=e.Group,available=row.Available,status=row.Reason,png};
     }).OrderByDescending(e=>e.available).ThenBy(e=>e.index==0?0:1).ThenBy(e=>e.group,StringComparer.Ordinal).ThenBy(e=>e.index).ToArray()};}
     internal static string Launch(int index){
+        HonorPcManager.RequireSignedIn();
         if(index<0||index>=Catalog.Length)throw new InvalidDataException();var row=Inspect(index);var entry=Catalog[index];
         if(!row.Available)throw new InvalidOperationException("缺少可调用路径："+row.Reason+(row.Reason=="服务未运行"?"。请先检查荣耀电脑管家及其服务。":"。"));
         var start=new ProcessStartInfo(row.Path){UseShellExecute=true,WorkingDirectory=Path.GetDirectoryName(row.Path)!};

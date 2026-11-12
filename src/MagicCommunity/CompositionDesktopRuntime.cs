@@ -66,7 +66,7 @@ public sealed partial class CompositionDesktopRuntime : IDisposable
         data=new(packet=>{if(connected&&!disposed)_=Send(new{type="card-data",data=packet});});
         encodeckApp=new(controller.Root);
         encodeck=new(encodeckApp,packet=>connected&&!disposed?Send(new{type="encodeck-data",data=packet}):Task.CompletedTask);
-        if(bridge is not null){popups=new(controller.Root,CompositionPopupSession.Selected(controller.Root),ui,Send,()=>connected&&!disposed&&bridge.NativePopupReady);popups.Icon=bridge.NativePanelIcon;popups.ApplicationIcon=bridge.NativeApplicationIcon;bridge.NativePopups=popups;shell=new(controller.Root,ui,Send){Icon=bridge.NativePanelIcon,ApplicationIcon=bridge.NativeApplicationIcon,InvalidateApplicationIcon=bridge.NativeInvalidateApplicationIcon,OpenSettings=bridge.NativeOpenSettings,StaticWorkspace=bridge.NativeShellWorkspace,PowerMode=mode=>{if(controller.PowerMode!=mode){controller.PowerMode=mode;controller.SetStatus("电源状态已更新。");}}};bridge.NativeShell=shell;bridge.NativeProbe=Probe;}
+        if(bridge is not null){popups=new(controller.Root,CompositionPopupSession.Selected(controller.Root),ui,Send,()=>connected&&!disposed&&bridge.NativePopupReady);popups.Icon=bridge.NativePanelIcon;popups.ApplicationIcon=bridge.NativeApplicationIcon;popups.ApplicationIdentity=bridge.NativeApplicationIdentity;bridge.NativePopups=popups;shell=new(controller.Root,ui,Send){Icon=bridge.NativePanelIcon,ApplicationIcon=bridge.NativeApplicationIcon,ApplicationIdentity=bridge.NativeApplicationIdentity,InvalidateApplicationIcon=bridge.NativeInvalidateApplicationIcon,OpenSettings=bridge.NativeOpenSettings,StaticWorkspace=bridge.NativeShellWorkspace,PowerMode=mode=>{if(controller.PowerMode!=mode){controller.PowerMode=mode;controller.SetStatus("电源状态已更新。");}}};bridge.NativeShell=shell;bridge.NativeProbe=Probe;}
         controller.Changed+=QueueSnapshot;
     }
     private async Task<object> Probe(JsonElement body,CancellationToken cancellation){
@@ -88,20 +88,21 @@ public sealed partial class CompositionDesktopRuntime : IDisposable
     private object Snapshot()
     {
         var definitions=bridge?.NativeCardDefinitions??catalog.Types;
+        bool honorSignedIn=HonorPcManager.ServicesVisible;
         var boards=controller.State.Boards.Where(b=>controller.Screens.Any(s=>s.Id==b.Id)).ToArray();
         if(boards.Length==0)throw new InvalidDataException("没有可显示的桌面。");
         var visibleCards=boards.Where(b=>visible.Contains(b.Id)).SelectMany(b=>DesktopCards.Items(b).Where(c=>b.Grid?.Placements.ContainsKey(DesktopCards.Key(c))==true))
             .Concat(recoveryVisible?DesktopDisplayRecovery.Offline(controller.State,controller.Screens).Where(b=>b.Id==recoveryBoard).SelectMany(DesktopCards.Items).Where(c=>recoveryCardIds.Contains(DesktopCards.Key(c))):[]).ToArray();
         var visibleTypes=visibleCards.Select(c=>c.Type).ToArray();
         if(!preview){weather.Demand(visibleCards);clipboardImage.Demand(visibleCards.Any(c=>c.Type=="system.clipboard-image"));encodeck.Demand(visibleTypes.Contains("system.encodeck",StringComparer.Ordinal));}
-        independentSystem?.MediaCardDemand(!preview&&visibleTypes.Contains("system.media",StringComparer.Ordinal));data.Demand(visibleTypes);handoff.Demand(visibleCards);honorServices.Demand(!preview&&visibleTypes.Contains("system.honor-service",StringComparer.Ordinal));
-        return new{session,revision=controller.State.Revision,recoveryCount=DesktopDisplayRecovery.Offline(controller.State,controller.Screens).Sum(b=>DesktopGridActions.Expected(b).Count),components=true,desktopRuntime=!preview,syntheticIcons=false,workspaceVersion=bridge?.NativeWorkspaceVersion??0,
-            handoffData=handoff.Projection(visibleCards),honorData=honorServices.Projection(bridge is null?null:bridge.NativeIcon),todoData=visibleTypes.Any(NativeTodoCards.IsTodo)?todos.Projection(controller.State):new{},preferences=CommunityPreferences.Load(controller.Root),recycleBinFull=RecycleBinWatch.CurrentFull,frontendVersion=AppController.Version,fixtureRoot=diagnostics,cardDefinitions=definitions,cardCatalogVersion=bridge?.NativeCardCatalogVersion??0,boards=boards.Select(board=>{
+        independentSystem?.MediaCardDemand(!preview&&visibleTypes.Contains("system.media",StringComparer.Ordinal));data.Demand(visibleTypes);handoff.Demand(visibleCards);honorServices.Demand(honorSignedIn&&!preview&&visibleTypes.Contains("system.honor-service",StringComparer.Ordinal));
+        return new{session,iconIdentityVersion=bridge?.NativeIconIdentityVersion??previewIcons?.IdentityVersion??0,revision=controller.State.Revision,recoveryCount=DesktopDisplayRecovery.Offline(controller.State,controller.Screens).Sum(b=>DesktopGridActions.Expected(b).Count),components=true,desktopRuntime=!preview,syntheticIcons=false,workspaceVersion=bridge?.NativeWorkspaceVersion??0,
+            handoffData=handoff.Projection(visibleCards),honorData=honorServices.Projection(bridge is null?null:bridge.NativeIcon),todoData=visibleTypes.Any(NativeTodoCards.IsTodo)?todos.Projection(controller.State):new{},preferences=CommunityPreferences.Load(controller.Root),recycleBinFull=RecycleBinWatch.CurrentFull,frontendVersion=AppController.Version,fixtureRoot=diagnostics,honorSignedIn,cardDefinitions=definitions.Where(d=>honorSignedIn||d.Type!="system.honor-service").ToArray(),cardCatalogVersion=bridge?.NativeCardCatalogVersion??0,boards=boards.Select(board=>{
                 var screen=controller.Screens.Single(s=>s.Id==board.Id);double scale=windows.GetValueOrDefault(board.Id).Scale;if(scale==0)scale=1;
                 var projection=bridge?.Projection(board,screen,scale)??DesktopGridLayout.Project(board,screen,scale);var placements=board.Grid?.Placements??new Dictionary<string,GridRect>();
                 var allTiles=NativeDesktopTrial.DesktopTiles(board).ToArray();var names=allTiles.ToDictionary(t=>t.Key,t=>t.Name);
                 foreach(var c in DesktopCards.Items(board))names[DesktopCards.Key(c)]=definitions.FirstOrDefault(d=>d.Type==c.Type)?.Title??"卡片";
-                var tiles=allTiles.Where(t=>placements.ContainsKey(t.Key)).Select(t=>(object)new{t.Key,t.Name,target=t.Item?.Target,isVirtual=t.Item?.IsVirtual??false,isFolder=t.Item?.IsFolder??false,folderId=t.Folder?.Id,items=t.Folder?.Items.Select(i=>new{key=DesktopGridActions.ItemKey(i),i.Name,i.Target,isVirtual=i.IsVirtual,isFolder=i.IsFolder})}).ToList();
+                var tiles=allTiles.Where(t=>placements.ContainsKey(t.Key)).Select(t=>(object)new{t.Key,t.Name,target=t.Item?.Target,iconExecutable=t.Item is null?"":bridge?.NativeDesktopIdentity(t.Item)??previewIcons?.DesktopIdentity(t.Item)??"",isVirtual=t.Item?.IsVirtual??false,isFolder=t.Item?.IsFolder??false,folderId=t.Folder?.Id,showItemCount=t.Folder?.ShowItemCount??true,items=t.Folder?.Items.Select(i=>new{key=DesktopGridActions.ItemKey(i),i.Name,i.Target,iconExecutable=bridge?.NativeDesktopIdentity(i)??previewIcons?.DesktopIdentity(i)??"",isVirtual=i.IsVirtual,isFolder=i.IsFolder})}).ToList();
                 foreach(var card in DesktopCards.Items(board).Where(c=>placements.ContainsKey(DesktopCards.Key(c)))){
                     var definition=definitions.FirstOrDefault(d=>d.Type==card.Type);
                     tiles.Add(new{key=DesktopCards.Key(card),name=definition?.Title??"卡片",card=new{card.Id,card.Type,card.Columns,card.Rows,Settings=card.Type=="system.handoff"?JsonSerializer.SerializeToElement(new{version=1}):card.Settings,custom=definition?.Custom}});
@@ -347,7 +348,12 @@ public sealed partial class CompositionDesktopRuntime : IDisposable
                     }else throw new InvalidDataException("未知菜单操作。");break;
                 }
                 case "desktop-action":{
-                    string kind=Text(request,"kind");if(kind is not ("settings" or "feedback" or "refresh" or "exit"))throw new InvalidDataException();
+                    string kind=Text(request,"kind");
+                    if(kind is "display" or "personalize"){
+                        if(!preview){_ = await ui.InvokeAsync(()=>Board(Text(request,"board")).Id);Process.Start(new ProcessStartInfo(kind=="display"?"ms-settings:display":"ms-settings:personalization"){UseShellExecute=true})?.Dispose();}
+                        break;
+                    }
+                    if(kind is not ("settings" or "feedback" or "refresh" or "exit"))throw new InvalidDataException();
                     if(!preview)await Call("/action",new{monitorId=Text(request,"board"),kind});break;
                 }
                 case "unplaced-action":{
@@ -393,9 +399,16 @@ public sealed partial class CompositionDesktopRuntime : IDisposable
                 }
                 case "folder-action":{
                     string board=Text(request,"board"),kind=Text(request,"kind"),folder=Text(request,"folderId");
-                    if(preview)await ui.InvokeAsync(()=>controller.Commit(state=>{var b=state.Boards.Single(b=>b.Id==board);if(kind=="dissolve")DesktopGridActions.Dissolve(b,folder);else if(kind=="resize")DesktopGridActions.Resize(b,folder,request.GetProperty("columns").GetInt32(),request.GetProperty("rows").GetInt32());else throw new InvalidDataException();},"预览文件夹已更新。"));
+                    if(preview)await ui.InvokeAsync(()=>controller.Commit(state=>{var b=state.Boards.Single(b=>b.Id==board);if(kind=="folder-count")DesktopGridActions.SetFolderCount(b,folder,request.GetProperty("show").GetBoolean());else if(kind=="dissolve")DesktopGridActions.Dissolve(b,folder);else if(kind=="resize")DesktopGridActions.Resize(b,folder,request.GetProperty("columns").GetInt32(),request.GetProperty("rows").GetInt32());else throw new InvalidDataException();},"预览文件夹已更新。"));
+                    else if(kind=="folder-count")await Call("/grid-action",new{monitorId=board,revision=controller.State.Revision,kind,folderId=folder,show=request.GetProperty("show").GetBoolean()});
                     else if(kind=="dissolve")await Call("/grid-action",new{monitorId=board,revision=controller.State.Revision,kind,folderId=folder});
                     else await Call("/grid-action",new{monitorId=board,revision=controller.State.Revision,kind,folderId=folder,columns=request.GetProperty("columns").GetInt32(),rows=request.GetProperty("rows").GetInt32()});break;
+                }
+                case "desktop-create":{
+                    string action=Text(request,"action");
+                    if(action is not ("folder" or "text"))throw new InvalidDataException("未知的新建类型。");
+                    if(!preview)await Call("/desktop-create-item",new{monitorId=Text(request,"board"),action,x=request.GetProperty("x").GetInt32(),y=request.GetProperty("y").GetInt32()});
+                    break;
                 }
                 case "new-folder":{
                     if(!preview)await Call("/grid-action",new{monitorId=Text(request,"board"),revision=controller.State.Revision,kind="new-folder",x=request.GetProperty("x").GetInt32(),y=request.GetProperty("y").GetInt32()});break;
@@ -442,6 +455,7 @@ public sealed partial class CompositionDesktopRuntime : IDisposable
                         await independentSystem.MediaCardAction(kind,Text(request,"sessionId"),Text(request,"trackId"),request.TryGetProperty("positionMs",out var mediaPosition)?mediaPosition.GetDouble():0);break;
                     }
                     if(kind.StartsWith("honor-",StringComparison.Ordinal)){
+                        HonorPcManager.RequireSignedIn();
                         if(preview)throw new LayoutEditException("隔离预览不读取或启动荣耀服务。");
                         string honorCardId=Text(request,"cardId");await ui.InvokeAsync(()=>{var card=DesktopCards.Require(Board(board),honorCardId);if(card.Type!="system.honor-service"||!visible.Contains(board)||Board(board).Grid?.Placements.ContainsKey(DesktopCards.Key(card))!=true)throw new InvalidDataException("卡片当前不可见。");});
                         int index=request.TryGetProperty("index",out var choice)?choice.GetInt32():0;

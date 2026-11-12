@@ -20,6 +20,8 @@ public static class HonorPcManager
             catch(Exception error) when(error is IOException or UnauthorizedAccessException or System.Security.SecurityException){return null;}
         }
     }
+    public static bool ServicesVisible => SignedIn == true;
+    public static void RequireSignedIn() { if (!ServicesVisible) throw new InvalidOperationException("荣耀服务当前不可用。"); }
     public static string? Find()
     {
         foreach(var hive in new[]{Registry.CurrentUser,Registry.LocalMachine})
@@ -38,6 +40,7 @@ public static class HonorPcManager
     public static void OpenCleanup()=>Open("/doctor/computerClean");
     private static void Open(string page)
     {
+        RequireSignedIn();
         string program=Find()??throw new InvalidOperationException("未找到荣耀电脑管家，请先安装或修复电脑管家。");
         var start=new ProcessStartInfo(program){UseShellExecute=false,WorkingDirectory=Path.GetDirectoryName(program)!};
         // The separator is the literal OEM string, not whitespace or an HTML entity to decode.

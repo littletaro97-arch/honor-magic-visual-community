@@ -5,6 +5,7 @@
 #include <physicalmonitorenumerationapi.h>
 #include <highlevelmonitorconfigurationapi.h>
 #include <cwctype>
+#include "../shared/brightness-feedback.h"
 #pragma comment(lib,"dxva2.lib")
 #pragma comment(lib,"wbemuuid.lib")
 // Public Windows WMI monitor classes. No polling, screen overlay or gamma ramp.
@@ -47,7 +48,34 @@ struct BrightnessState{
         std::shared_ptr<BrightnessPhysical> physical;DWORD minimum=0,maximum=100;
     };
     std::map<std::wstring,Item> items;std::atomic<unsigned> callbacks{0};
+    std::wstring noticeDisplay;unsigned noticeValue=0;
+    ULONGLONG noticeSequence=0,noticeTick=0;
 };
+// Call with state.gate held. This notice is separate from the state snapshot:
+// enumeration, hotplug and background synchronization must never create an OSD.
+void BrightnessNotice(BrightnessState &state,std::wstring const &id,unsigned value,ULONGLONG now){
+    // WMI may report an explicit write before ExecMethod returns. Both paths
+    // describe the same change; do not renew an already-delivered notice.
+    if(state.noticeDisplay==id&&state.noticeValue==value&&now>=state.noticeTick&&
+        now-state.noticeTick<=magic::feedback::BrightnessFeedbackWindowMs)return;
+    state.noticeDisplay=id;state.noticeValue=value;state.noticeTick=now;++state.noticeSequence;
+}
+bool ApplyBrightnessEvent(BrightnessState &state,std::wstring const &id,unsigned value,ULONGLONG now,bool recentInput){
+    auto it=state.items.find(id);
+    if(it==state.items.end()||!it->second.available||it->second.physical||value>100||it->second.value==value)return false;
+    it->second.value=value;
+    if(recentInput)BrightnessNotice(state,id,value,now);
+    else if(state.noticeDisplay==id)state.noticeDisplay.clear();
+    return true;
+}
+JsonObject BrightnessNoticeSnapshot(BrightnessState const &state){
+    JsonObject feedback;auto item=state.items.find(state.noticeDisplay);
+    if(state.active&&item!=state.items.end()&&item->second.available&&item->second.value==state.noticeValue){
+        Text(feedback,L"key",std::to_wstring(state.noticeTick)+L":"+std::to_wstring(state.noticeSequence));
+        Text(feedback,L"displayId",state.noticeDisplay);Number(feedback,L"value",state.noticeValue/100.0);Number(feedback,L"timestampMs",static_cast<double>(state.noticeTick));
+    }
+    return feedback;
+}
 std::wstring Property(IWbemClassObject *object,wchar_t const *key){
     if(!object)return L"";
     VARIANT value{};if(FAILED(object->Get(key,0,&value,nullptr,nullptr)))return L"";
@@ -58,6 +86,22 @@ unsigned Integer(IWbemClassObject *object,wchar_t const *key){
     VARIANT value{},converted{};if(FAILED(object->Get(key,0,&value,nullptr,nullptr)))return 0;
     unsigned n=0;if(SUCCEEDED(VariantChangeType(&converted,&value,0,VT_UI4)))n=converted.ulVal;
     VariantClear(&converted);VariantClear(&value);return n;
+}
+bool BrightnessNumber(VARIANT const &value,unsigned &number){
+    // Missing/NULL values and failed conversions are not 0% brightness.
+    switch(value.vt){case VT_UI1:case VT_I1:case VT_UI2:case VT_I2:case VT_UI4:case VT_I4:case VT_INT:case VT_UINT:break;default:return false;}
+    VARIANT converted{};bool valid=SUCCEEDED(VariantChangeType(&converted,&value,0,VT_UI4))&&converted.ulVal<=100;
+    if(valid)number=converted.ulVal;VariantClear(&converted);return valid;
+}
+bool ReadBrightness(IWbemClassObject *object,wchar_t const *key,unsigned &number){
+    if(!object)return false;
+    VARIANT value{};bool valid=SUCCEEDED(object->Get(key,0,&value,nullptr,nullptr))&&BrightnessNumber(value,number);
+    VariantClear(&value);return valid;
+}
+bool ActiveBrightnessEvent(IWbemClassObject *object){
+    if(!object)return false;
+    VARIANT value{};bool active=SUCCEEDED(object->Get(L"Active",0,&value,nullptr,nullptr))&&value.vt==VT_BOOL&&value.boolVal==VARIANT_TRUE;
+    VariantClear(&value);return active;
 }
 void ValidateBrightnessResult(IWbemClassObject *signature,IWbemClassObject *output){
     // Some monitor providers declare this method with no output parameters.
@@ -78,10 +122,15 @@ class BrightnessEvents final:public IWbemObjectSink {
     ULONG STDMETHODCALLTYPE AddRef()override{return ++refs;}
     ULONG STDMETHODCALLTYPE Release()override{auto n=--refs;if(!n)delete this;return n;}
     HRESULT STDMETHODCALLTYPE Indicate(LONG count,IWbemClassObject **objects)override{
-        try{if(!state->active)return S_OK;bool changed=false;{
+        try{if(!state->active)return S_OK;if(count>0&&!objects)return E_POINTER;
+            LASTINPUTINFO input{sizeof(input)};bool known=GetLastInputInfo(&input)!=FALSE;
+            auto now=GetTickCount64();bool recent=magic::feedback::RecentBrightnessInput(static_cast<DWORD>(now),input.dwTime,known);
+            bool changed=false;{
             std::scoped_lock lock(state->gate);
-            for(LONG i=0;i<count&&i<64;i++){auto name=Property(objects[i],L"InstanceName");auto entry=state->items.find(name);
-                unsigned n=Integer(objects[i],L"Brightness");if(entry!=state->items.end()&&n<=100&&entry->second.value!=n){entry->second.value=n;changed=true;}}
+            for(LONG i=0;i<count&&i<64;i++){
+                unsigned n=0;if(!ActiveBrightnessEvent(objects[i])||!ReadBrightness(objects[i],L"Brightness",n))continue;
+                changed=ApplyBrightnessEvent(*state,Property(objects[i],L"InstanceName"),n,now,recent)||changed;
+            }
         }if(changed){++state->callbacks;state->changes->Notify(2048);}}catch(...){return E_FAIL;}return S_OK;
     }
     HRESULT STDMETHODCALLTYPE SetStatus(LONG,HRESULT,BSTR,IWbemClassObject*)override{return S_OK;}
@@ -103,7 +152,7 @@ struct BrightnessProvider::Impl{
         std::map<std::wstring,BrightnessState::Item> found;
         std::map<std::wstring,double> sizes;
         if(service)try{
-            Query(L"SELECT * FROM WmiMonitorBrightness WHERE Active=TRUE",[&](auto row){auto id=Property(row,L"InstanceName");auto n=Integer(row,L"CurrentBrightness");if(!id.empty()&&n<=100)found[id]={id,L"",n};});
+            Query(L"SELECT * FROM WmiMonitorBrightness WHERE Active=TRUE",[&](auto row){auto id=Property(row,L"InstanceName");unsigned n=0;if(!id.empty()&&ReadBrightness(row,L"CurrentBrightness",n))found[id]={id,L"",n};});
             Query(L"SELECT * FROM WmiMonitorBrightnessMethods WHERE Active=TRUE",[&](auto row){auto id=Property(row,L"InstanceName");if(found.contains(id))found[id].path=Property(row,L"__PATH");});
             std::erase_if(found,[](auto const &entry){return entry.second.path.empty();});
         }catch(winrt::hresult_error const &e){error=e.code();found.clear();}
@@ -136,7 +185,7 @@ struct BrightnessProvider::Impl{
             return TRUE;
         },reinterpret_cast<LPARAM>(&context));
         // Destruction of old physical handles happens outside the data lock.
-        {std::scoped_lock lock(state->gate);state->items.swap(found);}
+        {std::scoped_lock lock(state->gate);state->items.swap(found);state->noticeDisplay.clear();}
     }
     void Start(){
         if(state->active)return;
@@ -155,6 +204,7 @@ JsonObject BrightnessProvider::Read(bool refresh){
     if(refresh){{std::scoped_lock lock(impl->gate);if(impl->state->active)impl->Collect();else impl->Start();}impl->state->changes->Notify(2048);}
     JsonObject result;JsonArray displays;std::scoped_lock lock(impl->state->gate);
     bool available=false;for(auto const &[id,item]:impl->state->items){JsonObject row;Text(row,L"id",id);Number(row,L"value",item.value/100.0);Text(row,L"monitorId",item.monitor);Text(row,L"name",item.name);Flag(row,L"primary",item.primary);Flag(row,L"available",item.available);Text(row,L"transport",item.physical?L"ddc":item.path.empty()?L"unsupported":L"wmi");Number(row,L"diagonalInches",item.inches);Number(row,L"widthPx",item.width);Number(row,L"heightPx",item.height);available|=item.available;displays.Append(row);}
+    result.Insert(L"feedback",BrightnessNoticeSnapshot(*impl->state));
     Flag(result,L"available",impl->state->active&&available);Flag(result,L"events",impl->events);result.Insert(L"displays",displays);return result;
 }
 JsonObject BrightnessProvider::Subscribe(bool enabled){
@@ -169,7 +219,10 @@ JsonObject BrightnessProvider::Set(JsonObject const &args){
     {std::scoped_lock data(impl->state->gate);auto it=impl->state->items.find(id);if(it==impl->state->items.end()||!it->second.available)throw std::invalid_argument("Brightness display is no longer available");item=it->second;}
     if(item.physical){
         double actual=ApplyPhysicalBrightness(*item.physical,item.monitor,item.monitorKey,value);
-        {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id))impl->state->items[id].value=static_cast<unsigned>(std::lround(actual*100));}
+        {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id)){
+            unsigned n=static_cast<unsigned>(std::lround(actual*100));impl->state->items[id].value=n;
+            if(n!=item.value)BrightnessNotice(*impl->state,id,n,GetTickCount64());
+        }}
         impl->state->changes->Notify(2048);JsonObject result;Flag(result,L"accepted",true);Number(result,L"value",actual);return result;
     }
     if(!impl->service||item.path.empty())throw std::invalid_argument("Brightness display is no longer available");
@@ -183,7 +236,10 @@ JsonObject BrightnessProvider::Set(JsonObject const &args){
     VARIANT level{};level.vt=VT_UI1;level.bVal=static_cast<BYTE>(std::lround(value*100));winrt::check_hresult(input->Put(L"Brightness",0,&level,0));
     winrt::check_hresult(impl->service->ExecMethod(WmiString(item.path.c_str()).get(),WmiString(L"WmiSetBrightness").get(),0,nullptr,input.get(),output.put(),nullptr));
     ValidateBrightnessResult(outputSignature.get(),output.get());
-    {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id))impl->state->items[id].value=level.bVal;}
+    {std::scoped_lock data(impl->state->gate);if(impl->state->items.contains(id)){
+        impl->state->items[id].value=level.bVal;
+        if(level.bVal!=item.value)BrightnessNotice(*impl->state,id,level.bVal,GetTickCount64());
+    }}
     impl->state->changes->Notify(2048);JsonObject result;Flag(result,L"accepted",true);Number(result,L"value",level.bVal/100.0);return result;
 }
 }
