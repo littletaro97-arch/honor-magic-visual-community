@@ -8,9 +8,11 @@ Windows 桌面宿主由独立 Win32/.NET 程序实现。桌面 Widget 的当前�
 
 ## 当前预览版
 
-当前候选版本为 **v0.5.1**，面向 Windows 11 x64。 [下载页与发行说明](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/tag/v0.5.1)。安装包为未签名的测试版；当前图标 / Dock 清晰度仍有用户反馈，其他需实机验收的项目详见发行说明，不代表所有桌面、多屏或游戏场景均已验收通过。
+当前公开预发布版为 **v0.5.9**，适用于 Windows 11 x64。[下载 v0.5.9 与查看发行说明](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/tag/v0.5.9) · [所有版本](https://github.com/littletaro97-arch/honor-magic-visual-community/releases)。
 
-在发行页的 **Assets** 下载 `MagicCommunity-Setup-0.5.1-x64-unsigned.zip`，解压后运行安装向导。安装受保护目录时由 Windows 正常显示 UAC。请勿关闭系统安全提示；未签名安装包会显示 Windows 的发布者警告。
+在发行页的 **Assets** 下载 `MagicCommunity-Setup-0.5.9-x64-unsigned.exe`，或下载 `MagicCommunity-Setup-0.5.9-x64.zip` 并解压后运行安装器。ZIP 附带安装与验收说明；可参考发行页的 `SHA256SUMS.txt` 校验下载文件。
+
+这是未签名的预发布版，无需导入证书。安装向导会正常请求 Windows 管理员权限，请勿关闭系统安全提示。实际桌面拖放、多屏 Dock 和覆盖升级仍待实机验收，详见发行说明。
 
 ## 目录
 
