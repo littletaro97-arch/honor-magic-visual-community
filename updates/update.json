@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
   "repository": "littletaro97-arch/honor-magic-visual-community",
-  "generatedAtUtc": "2026-11-19T11:35:15.151731+00:00",
+  "generatedAtUtc": "2026-11-26T11:11:18.232804+00:00",
   "releases": [
     {
-      "tag_name": "v0.5.9",
+      "tag_name": "v0.6.7-r1",
       "draft": false,
       "prerelease": true,
-      "published_at": "2026-11-19T11:35:03Z",
-      "body": "Magic 视界社区版 v0.5.9 公开预发布，适用于 Windows 11 x64。\n\n## 下载与安装\n\n- 直接使用 Assets 中的 MagicCommunity-Setup-0.5.9-x64-unsigned.exe，双击后按向导安装。\n- ZIP 提供同一份安装器，另附安装与验收说明、校验清单和社区群二维码。\n- 安装无需导入证书。向导会请求管理员权限。覆盖安装时可继续使用原数据目录。\n\n## 本版改动\n\n- 改进音乐卡片定位浏览器播放源，支持匹配带站点后缀和播放状态标记的标题。\n- Windows 大文件夹支持真实文件拖入和拖出，并识别 Ctrl 复制和 Shift 移动。\n- Dock 状态组件的图标和值居中显示，改善竖向 Dock 的标签省略。\n- 改进顶栏与托盘菜单避让，并修正右键在资源管理器中定位。\n\n已校验 1493 个运行文件。实际桌面拖放、多屏 Dock 和覆盖升级仍待实机验收。附件的 SHA-256 见 SHA256SUMS.txt。\r\n\r\n安装器构建标识为 706a585。GitHub 自动列出的 Source code 归档对应仓库已有的公开标签目标 17866a0。\r\n"
+      "published_at": "2026-11-26T11:11:07Z",
+      "body": "适用于 Windows 11 x64。此预发布修复 v0.6.7 在卸载时弹出 `Cannot call \"WizardSilent\" function during Uninstall` 的问题。\n\n## 下载与安装\n\n- [完整安装 ZIP](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/download/v0.6.7-r1/MagicCommunity-Setup-0.6.7-r1-x64.zip) 包含一键安装器、安装与验收说明、更新说明、社区群二维码、第三方许可和校验清单。解压后运行包内的 EXE。\n- [一键安装程序](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/download/v0.6.7-r1/MagicCommunity-Setup-0.6.7-x64-unsigned-r1.exe) 可直接运行。安装向导会请求管理员权限，无需导入证书。\n- [SHA-256 校验清单](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/download/v0.6.7-r1/SHA256SUMS.txt) 可校验这两个下载文件。\n\n已有 v0.6.7 的用户，关闭旧卸载报错窗口后运行 r1 安装器，沿用原目录覆盖安装。安装完成后，从 **Windows 设置 → 应用 → 已安装的应用** 选择卸载。希望保留布局、卡片和反馈数据时，在社区版的卸载提示中选择「是」。Windows 应用列表仍会显示 0.6.7。\n\n## 本版改动\n\n- 修复卸载入口调用安装向导的静默检查，覆盖安装会更新卸载程序。\n- v0.6.7 基于 v0.6.6r3，带来玻璃材质、桌面拖放落位过渡、定时电源面板输入框对齐、Dock 右键过渡和音乐预览间距调整。\n\n## 验证\n\n在隔离目录复现旧版报错，并验证同版本覆盖安装后可以正常卸载。安装器的四项只读预检通过，应用载荷的 1,495 个文件与 v0.6.7 一致。实际桌面安装与卸载以真机验收为准。\n\n## 发布范围\n\n安装程序的构建标识为 `34c6fdf`，内含的应用构建标识为 `421a444`。GitHub 自动生成的源码归档对应仓库已公开提交 `96c174b`。\n"
     }
   ]
 }
