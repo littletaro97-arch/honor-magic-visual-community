@@ -2,17 +2,19 @@
 
 Windows 桌面社区项目，提供统一桌面网格、虚拟大文件夹、Windows 文件操作与通用拖放、顶栏弹窗，以及声明式卡片入口和管理。
 
-Windows 桌面宿主由独立 Win32/.NET 程序实现。桌面 Widget 的当前构建仍使用 `@seelen-ui/lib` 2.8.4，并复用部分上游样式；它们及仓库保留的其他上游内容继续适用各自许可证，详见 [`NOTICE.md`](NOTICE.md) 和 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
+Windows 桌面宿主由独立 Win32/.NET 程序实现。仓库中的桌面 Widget 使用 `@seelen-ui/lib` 2.8.4，并复用部分上游样式；它们及仓库保留的其他上游内容继续适用各自许可证，详见 [`NOTICE.md`](NOTICE.md) 和 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
 
 项目优先级是**低占用、低延迟、低续航影响**。当前仍为预览阶段；自动检查与真实 Windows 桌面验收分开记录。
 
 ## 当前预览版
 
-当前公开预发布版为 **v0.5.9**，适用于 Windows 11 x64。[下载 v0.5.9 与查看发行说明](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/tag/v0.5.9) · [所有版本](https://github.com/littletaro97-arch/honor-magic-visual-community/releases)。
+当前公开预发布版为 **v0.6.7-r1**，适用于 Windows 11 x64。[预发布页面](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/tag/v0.6.7-r1) · [安装与卸载说明](docs/releases/v0.6.7-r1.md) · [所有版本](https://github.com/littletaro97-arch/honor-magic-visual-community/releases)。
 
-在发行页的 **Assets** 下载 `MagicCommunity-Setup-0.5.9-x64-unsigned.exe`，或下载 `MagicCommunity-Setup-0.5.9-x64.zip` 并解压后运行安装器。ZIP 附带安装与验收说明；可参考发行页的 `SHA256SUMS.txt` 校验下载文件。
+- [一键安装 ZIP](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/download/v0.6.7-r1/MagicCommunity-Setup-0.6.7-r1-x64.zip) 包含安装程序、安装与验收说明、社区群二维码和校验清单。
+- [直接下载安装程序](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/download/v0.6.7-r1/MagicCommunity-Setup-0.6.7-x64-unsigned-r1.exe)，双击后按向导安装。
+- [SHA-256 校验清单](https://github.com/littletaro97-arch/honor-magic-visual-community/releases/download/v0.6.7-r1/SHA256SUMS.txt) 可核对 ZIP 和安装程序。
 
-这是未签名的预发布版，无需导入证书。安装向导会正常请求 Windows 管理员权限，请勿关闭系统安全提示。实际桌面拖放、多屏 Dock 和覆盖升级仍待实机验收，详见发行说明。
+已有 v0.6.7 的用户请沿用原目录运行 r1 安装器。安装完成后可从 Windows 设置卸载。应用列表中的版本仍显示 0.6.7。安装包未签名，向导会请求管理员权限，无需导入证书。
 
 ## 目录
 
